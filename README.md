@@ -478,8 +478,8 @@ LOCO Protocol 을 쓰려면 사실상 비공개 동작을 리버스 엔지니어
 
 ### 이 기능을 Rust 로 작성하면 더 빨라질까요?
 
-조금은 빨라질 수 있지만, 체감 성능 향상은 제한적일 가능성이 큽니다. 이 CLI 의 주된 지연은 언어 런타임보다 `AXUIElement` 호출, UI 탐색, KakaoTalk 창 활성화/복구, 실제 앱 응답 시간에서 발생합니다.
-Rust 로 바꾸면 cold start 나 순수 stdio/JSON 처리 같은 부분은 약간 유리할 수 있지만, 전체 end-to-end latency 는 크게 달라지지 않을 가능성이 높습니다. 대신 macOS native framework binding 과 유지보수 비용은 Swift 보다 높아질 수 있습니다.
+일부 구간은 빨라질 수 있지만, 체감 성능 향상은 제한적일 가능성이 큽니다. `kmsg` 의 주된 지연은 언어 런타임보다 `AXUIElement` 호출, UI 탐색, KakaoTalk 창 활성화/복구, 실제 앱 응답 시간에서 발생합니다.
+Rust 로 바꾸면 단발 CLI cold start, 순수 stdio 프레이밍, JSON encode/decode 같은 좁은 구간은 유리할 수 있습니다. 하지만 MCP 서버처럼 프로세스가 이미 떠 있는 경로에서는 그 이득이 더 작아지고, 전체 end-to-end latency 는 여전히 macOS AX 와 KakaoTalk UI 응답 시간이 지배합니다. 대신 Rust 는 macOS native framework binding 과 FFI 관리 비용이 Swift 보다 커질 수 있습니다.
 
 ## Inspiration
 
