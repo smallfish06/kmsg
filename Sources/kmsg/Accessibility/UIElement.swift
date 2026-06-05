@@ -109,6 +109,12 @@ public final class UIElement: @unchecked Sendable {
         attributeOptional(kAXDescriptionAttribute)
     }
 
+    /// AXHelp tooltip text. KakaoTalk attaches the full send date
+    /// (e.g. "2026. 6. 2.") to each message's time label here.
+    public var helpText: String? {
+        attributeOptional(kAXHelpAttribute)
+    }
+
     public var identifier: String? {
         attributeOptional(kAXIdentifierAttribute)
     }

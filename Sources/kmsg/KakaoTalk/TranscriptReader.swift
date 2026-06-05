@@ -7,11 +7,15 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
     let body: String
     let isSystem: Bool
     let logicalTimestamp: Date?
+    /// Calendar date of the message ("YYYY-MM-DD"), read from the time
+    /// label's AXHelp tooltip. nil when the tooltip was unavailable.
+    let date: String?
 
     enum CodingKeys: String, CodingKey {
         case author
         case timeRaw = "time_raw"
         case body
+        case date
     }
 
     func encode(to encoder: Encoder) throws {
@@ -19,6 +23,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         try container.encode(author ?? "(me)", forKey: .author)
         try container.encodeIfPresent(timeRaw, forKey: .timeRaw)
         try container.encode(body, forKey: .body)
+        try container.encodeIfPresent(date, forKey: .date)
     }
 }
 
@@ -202,6 +207,9 @@ struct KakaoTalkTranscriptReader {
         var leftAnchorAuthor: String?
         var leftAnchorTimeRaw: String?
         var currentDateAnchor: Date?
+        // AXHelp tooltip date ("YYYY-MM-DD") carried forward so consecutive
+        // messages that share a single time label inherit the same day.
+        var lastKnownDate: String?
 
         for (offset, analysis) in analyses.enumerated() {
             let side = analysis.side
@@ -242,13 +250,19 @@ struct KakaoTalkTranscriptReader {
                 continue
             }
 
+            if let axHelpDate = analysis.axHelpDate {
+                lastKnownDate = axHelpDate
+            }
+            let resolvedDate = analysis.axHelpDate ?? lastKnownDate
+
             if analysis.isSystemLikeRow {
                 let message = TranscriptMessage(
                     author: nil,
                     timeRaw: analysis.timeRaw,
                     body: bodyCandidate.body,
                     isSystem: true,
-                    logicalTimestamp: currentDateAnchor
+                    logicalTimestamp: currentDateAnchor,
+                    date: resolvedDate
                 )
                 messages.append(message)
                 continue
@@ -283,7 +297,8 @@ struct KakaoTalkTranscriptReader {
                     for: resolvedTime,
                     dateAnchor: currentDateAnchor,
                     referenceDate: referenceDate
-                )
+                ),
+                date: resolvedDate
             )
             messages.append(message)
             if selectedLogs < 10 {
@@ -322,6 +337,7 @@ struct KakaoTalkTranscriptReader {
         var metadataTokensBuffer: [String] = []
         var buttonTitlesBuffer: [String] = []
         var imageFrames: [CGRect] = []
+        var rowHelpDate: String?
 
         for container in containers {
             var textAreas: [UIElement] = []
@@ -369,6 +385,9 @@ struct KakaoTalkTranscriptReader {
             }
 
             for staticText in staticTexts {
+                if rowHelpDate == nil, let help = staticText.helpText, let parsed = Self.parseHelpDate(help) {
+                    rowHelpDate = parsed
+                }
                 let normalized = normalizeBodyText(staticText.stringValue)
                 guard !normalized.isEmpty else { continue }
                 metadataTokensBuffer.append(contentsOf: metadataTokens(from: normalized))
@@ -436,7 +455,8 @@ struct KakaoTalkTranscriptReader {
             timeRaw: metadata.timeRaw,
             side: side,
             rowFrame: cachedRowFrame,
-            isSystemLikeRow: systemLikeRow
+            isSystemLikeRow: systemLikeRow,
+            axHelpDate: rowHelpDate
         )
     }
 
@@ -469,7 +489,8 @@ struct KakaoTalkTranscriptReader {
                         for: metadata.timeRaw,
                         dateAnchor: nil,
                         referenceDate: referenceDate
-                    )
+                    ),
+                    date: row.flatMap { axHelpDate(in: $0) }
                 )
             )
         }
@@ -486,7 +507,8 @@ struct KakaoTalkTranscriptReader {
                             timeRaw: nil,
                             body: title,
                             isSystem: false,
-                            logicalTimestamp: nil
+                            logicalTimestamp: nil,
+                            date: nil
                         )
                     )
                 }
@@ -850,6 +872,35 @@ struct KakaoTalkTranscriptReader {
         return nil
     }
 
+    /// Parse the AXHelp tooltip KakaoTalk attaches to a message's time label,
+    /// e.g. "2026. 6. 2." -> "2026-06-02".
+    private static func parseHelpDate(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let match = trimmed.range(
+            of: #"(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.?"#,
+            options: .regularExpression
+        ) else {
+            return nil
+        }
+        let numbers = trimmed[match]
+            .split(whereSeparator: { !$0.isNumber })
+            .compactMap { Int($0) }
+        guard numbers.count >= 3 else { return nil }
+        return String(format: "%04d-%02d-%02d", numbers[0], numbers[1], numbers[2])
+    }
+
+    /// Scan a row's static texts for the first AXHelp date tooltip.
+    /// Used by the fallback message path, which lacks the per-row analysis.
+    private func axHelpDate(in row: UIElement) -> String? {
+        let staticTexts = row.findAll(role: kAXStaticTextRole, limit: 12, maxNodes: 240)
+        for staticText in staticTexts {
+            if let help = staticText.helpText, let parsed = Self.parseHelpDate(help) {
+                return parsed
+            }
+        }
+        return nil
+    }
+
     private func firstAncestor(of element: UIElement, role: String, maxHops: Int) -> UIElement? {
         var cursor: UIElement? = element
         var hops = 0
@@ -1017,6 +1068,7 @@ private struct RowAnalysis {
     let side: MessageSide
     let rowFrame: CGRect?
     let isSystemLikeRow: Bool
+    let axHelpDate: String?
 
     var referenceFrame: CGRect? {
         bodyCandidate?.frame ?? rowFrame
