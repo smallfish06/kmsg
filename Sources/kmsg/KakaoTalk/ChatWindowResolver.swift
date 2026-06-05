@@ -51,6 +51,10 @@ private struct SearchCandidate {
     let element: UIElement
     let textScore: Int
     let matchedText: String
+    /// Screen point captured while the element was still fresh. KakaoTalk invalidates
+    /// search-result AX handles within a few hundred ms, so the coordinate must be read
+    /// at scan time, not at click time.
+    let clickPoint: CGPoint?
 }
 
 struct ChatWindowResolver {
@@ -636,11 +640,14 @@ struct ChatWindowResolver {
                 )
                 guard matchScore > 0, let matchedText else { continue }
                 let activationCandidate = activationTarget(for: candidate)
+                // Capture the click coordinate now, while the handle is valid.
+                let clickPoint = centerPoint(of: candidate.frame) ?? centerPoint(of: activationCandidate.frame)
                 results.append(
                     SearchCandidate(
                         element: activationCandidate,
                         textScore: matchScore,
-                        matchedText: matchedText
+                        matchedText: matchedText,
+                        clickPoint: clickPoint
                     )
                 )
             }
@@ -758,17 +765,17 @@ struct ChatWindowResolver {
         return relativeY < 0.5
     }
 
-    private func pickBestSearchResult(from candidates: [SearchCandidate]) -> UIElement? {
+    private func pickBestSearchResult(from candidates: [SearchCandidate]) -> SearchCandidate? {
         guard !candidates.isEmpty else { return nil }
         let best = candidates.max { lhs, rhs in
             scoreSearchResult(lhs) < scoreSearchResult(rhs)
         }
         if let best {
             runner.log(
-                "search: best result role='\(best.element.role ?? "unknown")' title='\(best.element.title ?? "")' textScore=\(best.textScore) matched='\(best.matchedText)'"
+                "search: best result role='\(best.element.role ?? "unknown")' title='\(best.element.title ?? "")' textScore=\(best.textScore) matched='\(best.matchedText)' clickPoint=\(best.clickPoint.map { "(\(Int($0.x)),\(Int($0.y)))" } ?? "none")"
             )
         }
-        return best?.element
+        return best
     }
 
     private func scoreSearchResult(_ candidate: SearchCandidate) -> Int {
@@ -793,14 +800,22 @@ struct ChatWindowResolver {
         if element.role == nil || element.role?.isEmpty == true {
             score -= 2_000
         }
+        // Prefer a visible, clickable row: KakaoTalk emits a collapsed h=0 section header
+        // that matches the same text but has no clickable area.
+        if candidate.clickPoint != nil {
+            score += 200
+        } else {
+            score -= 5_000
+        }
         return score
     }
 
     private func triggerSearchResultOpen(
-        _ result: UIElement,
+        _ candidate: SearchCandidate,
         searchField: UIElement,
         opened: () -> Bool
     ) -> Bool {
+        let result = candidate.element
         var didTriggerAction = false
 
         if tryActivateSearchResult(result, label: "result") {
@@ -808,6 +823,20 @@ struct ChatWindowResolver {
             if runner.waitUntil(label: "search open confirm", timeout: 0.24, pollInterval: 0.05, evaluateAfterTimeout: false, condition: opened) {
                 return true
             }
+        }
+
+        // Search-result rows only expose AXShowDefaultUI/AXShowAlternateUI and ignore
+        // keyboard Enter, so a real double-click is the reliable way to open the chat.
+        // Use the point captured at scan time; the AX handle is often stale by now.
+        if let clickPoint = candidate.clickPoint ?? clickableCenter(of: result) {
+            kakao.activate()
+            runner.mouseDoubleClick(at: clickPoint, label: "search result")
+            didTriggerAction = true
+            if runner.waitUntil(label: "search open confirm (double-click)", timeout: 0.6, pollInterval: 0.05, evaluateAfterTimeout: false, condition: opened) {
+                return true
+            }
+        } else {
+            runner.log("search: double-click skipped (no clickable frame)")
         }
         runner.log("search: direct activate miss; skipping heavy neighbor scan for speed")
 
@@ -1117,6 +1146,27 @@ struct ChatWindowResolver {
         }
 
         return unique
+    }
+
+    /// Center of a frame, or nil if the frame is missing or too small to click reliably.
+    private func centerPoint(of frame: CGRect?) -> CGPoint? {
+        guard let frame, frame.width >= 4, frame.height >= 4 else { return nil }
+        return CGPoint(x: frame.midX, y: frame.midY)
+    }
+
+    /// Live re-read fallback for a clickable screen point. Collapsed/zero-area rows
+    /// (e.g. KakaoTalk's hidden section header) have no usable center, so descend to the
+    /// first visible descendant before giving up. Prefer the point captured at scan time.
+    private func clickableCenter(of element: UIElement) -> CGPoint? {
+        if let point = centerPoint(of: element.frame) {
+            return point
+        }
+        if let visible = element.findFirst(where: { child in
+            centerPoint(of: child.frame) != nil
+        }) {
+            return centerPoint(of: visible.frame)
+        }
+        return nil
     }
 
     private func activationTarget(for element: UIElement) -> UIElement {
