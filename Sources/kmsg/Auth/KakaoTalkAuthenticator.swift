@@ -56,6 +56,14 @@ final class KakaoTalkAuthenticator {
         using store: CredentialStore,
         mode: AuthenticationMode
     ) throws -> AuthenticationOutcome {
+        // KakaoTalk may be running with its main window closed (the user closed the window
+        // but left the app running in the background). Activation alone won't reopen it, so
+        // an already-authenticated session would be misread as logged-out and fall through to
+        // a failing blind keyboard login. Reopen the window once before evaluating auth state.
+        _ = kakao.ensureWindowReopened(timeout: 3.0, trace: { [self] message in
+            runner.log("auth: \(message)")
+        })
+
         if mode == .promptForFreshCredentials {
             let prompted = try PasswordPrompt.promptForCredentials(defaultIdentifier: store.storedIdentifier())
 

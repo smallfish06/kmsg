@@ -188,6 +188,22 @@ public final class KakaoTalkApp: Sendable {
         return currentUsableWindow()
     }
 
+    /// Reopen KakaoTalk's main window when the app is already running but exposes no window.
+    /// The user may have closed the window while leaving KakaoTalk running in the background;
+    /// macOS activation does not restore a closed window, but issuing the reopen event (via
+    /// `open`) does. No-op when a usable window already exists.
+    /// - Returns: A usable window once available, otherwise nil.
+    @discardableResult
+    public func ensureWindowReopened(timeout: TimeInterval = 3.0, trace: ((String) -> Void)? = nil) -> UIElement? {
+        if let window = currentUsableWindow() {
+            return window
+        }
+
+        trace?("No open window; issuing reopen via open command")
+        _ = Self.forceOpen()
+        return waitForUsableWindow(timeout: timeout, trace: trace)
+    }
+
     // MARK: - Windows
 
     /// Get all KakaoTalk windows
