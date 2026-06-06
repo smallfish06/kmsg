@@ -338,6 +338,12 @@ struct ChatWindowResolver {
         kakao.activate()
         _ = tryRaiseWindow(window)
 
+        // preserve mode (default) keeps the user's window size/position untouched;
+        // only bring it forward. Resizing is opt-in via --layout left/right.
+        guard layoutMode != .preserve else {
+            return
+        }
+
         guard let currentSize = window.size else {
             runner.log("\(label): size unavailable; skipping resize")
             return
