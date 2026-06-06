@@ -105,6 +105,23 @@ jobs:
           echo "Resolved tag: $TAG"
           echo "Resolved tag source: $SOURCE"
 
+      - name: Check out release tag for dispatch input
+        if: steps.meta.outputs.source == 'dispatch_input'
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # A dispatched explicit tag must be built from that tag's commit so the
+          # embedded BuildVersion (read from VERSION) matches the release tag.
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+            git checkout --force --detach "refs/tags/$TAG"
+            echo "Building from tag $TAG ($(git rev-parse --short HEAD))"
+          else
+            echo "::warning::Tag $TAG does not exist locally; building from the current ref. The version check will enforce VERSION/tag consistency."
+          fi
+
       - name: Build universal binary
         shell: bash
         run: |
@@ -127,6 +144,24 @@ jobs:
           chmod +x "$RELEASE_ASSET_NAME"
           file "$RELEASE_ASSET_NAME"
           lipo -info "$RELEASE_ASSET_NAME"
+
+      - name: Verify binary version matches release tag
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # The release asset must report the same version as the tag it ships
+          # under; otherwise the VERSION file did not reflect the release tag.
+          EXPECTED="${TAG#v}"
+          ACTUAL="$(./"$RELEASE_ASSET_NAME" --version | tr -d '[:space:]')"
+
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo "::error::Built binary version '$ACTUAL' does not match release tag '$TAG' (expected '$EXPECTED')."
+            exit 1
+          fi
+          echo "Binary version matches release tag: $ACTUAL"
 
       - name: Create or update release
         env:
