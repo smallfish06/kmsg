@@ -1,6 +1,7 @@
 # kmsg
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Total downloads](https://img.shields.io/github/downloads/channprj/kmsg/total?label=downloads&logo=github)](https://github.com/channprj/kmsg/releases)
 
 <p><img src="assets/kmsg-logo.jpg" alt="kmsg logo" width="220" /></p>
 
