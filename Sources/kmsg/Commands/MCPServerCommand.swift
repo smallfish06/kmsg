@@ -312,7 +312,7 @@ private final class KmsgMCPServer {
                         ],
                         "layout": [
                             "type": "string",
-                            "enum": ["preserve", "left", "right"],
+                            "enum": ["preserve", "left", "right", "split-left", "split-right"],
                             "default": readLayoutDefault,
                             "description": "Window layout before reading",
                         ],
@@ -462,8 +462,8 @@ private final class KmsgMCPServer {
         guard let layout = Self.validReadLayout(arguments["layout"] as? String ?? readLayoutDefault) else {
             return errorPayload(
                 code: "INVALID_ARGUMENT",
-                message: "layout must be preserve, left, or right",
-                hint: "Use layout=preserve, layout=left, or layout=right.",
+                message: "layout must be preserve, left, right, split-left, or split-right",
+                hint: "Use layout=preserve, layout=left, layout=right, layout=split-left, or layout=split-right.",
                 rawStdout: "",
                 rawStderr: "",
                 latencyMs: 0
@@ -801,7 +801,7 @@ private final class KmsgMCPServer {
         guard let raw else { return nil }
         let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch normalized {
-        case "preserve", "left", "right":
+        case "preserve", "left", "right", "split-left", "split-right":
             return normalized
         default:
             return nil

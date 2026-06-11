@@ -70,6 +70,7 @@ kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --keep-window
 kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json
 kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json --background-safe
 kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --deep-recovery
+kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --layout split-right
 kmsg watch "본인, 친구, 또는 단톡방 이름"
 kmsg watch "본인, 친구, 또는 단톡방 이름" --json
 kmsg watch "본인, 친구, 또는 단톡방 이름" --json --poll-interval 0.5
@@ -118,7 +119,7 @@ kmsg chats [--verbose] [--limit <limit>] [--trace-ax] [--json] [--keep-window]
 ### read
 
 ```bash
-kmsg read <chat> [--limit <limit>] [--debug] [--trace-ax] [--keep-window] [--background-safe] [--deep-recovery] [--json]
+kmsg read <chat> [--limit <limit>] [--debug] [--trace-ax] [--keep-window] [--background-safe] [--deep-recovery] [--layout <layout>] [--json]
 ```
 
 - `-l, --limit <limit>`: 최대 메시지 개수 (기본값: 20)
@@ -127,6 +128,7 @@ kmsg read <chat> [--limit <limit>] [--debug] [--trace-ax] [--keep-window] [--bac
 - `-k, --keep-window`: 자동으로 연 채팅창과 리스트창 유지
 - `--background-safe`: 카카오톡 실행/활성화/자동 로그인/검색/채팅방 열기/창 크기 변경/자동 닫기를 하지 않고, 이미 노출된 매칭 채팅창만 읽음
 - `--deep-recovery`: 빠른 탐색 실패 시 deep recovery 수행
+- `--layout <layout>`: `preserve`, `left`, `right`, `split-left`, `split-right`. 마케팅 작업자가 브라우저/광고툴과 화면을 나눠 쓸 때는 `split-left` 또는 `split-right`를 사용
 - `--json`: JSON 형식으로 출력
 
 ### watch

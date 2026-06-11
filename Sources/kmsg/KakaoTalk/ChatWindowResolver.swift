@@ -5,6 +5,16 @@ enum ChatWindowLayoutMode: String {
     case preserve
     case left
     case right
+    case splitLeft = "split-left"
+    case splitRight = "split-right"
+
+    var isRightAligned: Bool {
+        self == .right || self == .splitRight
+    }
+
+    var isSplit: Bool {
+        self == .splitLeft || self == .splitRight
+    }
 }
 
 enum ChatWindowResolutionMethod {
@@ -65,6 +75,7 @@ private struct SearchCandidate {
 
 struct ChatWindowResolver {
     private static let minimumReadableWindowSize = CGSize(width: 760, height: 900)
+    private static let minimumSplitWindowSize = CGSize(width: 520, height: 680)
     private static let maximumAutomaticWindowSize = CGSize(width: 1200, height: 1000)
 
     private let kakao: KakaoTalkApp
@@ -456,6 +467,10 @@ struct ChatWindowResolver {
             return nil
         }
 
+        if layoutMode.isSplit {
+            return splitLayoutFrame(in: usableFrame)
+        }
+
         let layoutSize = CGSize(
             width: min(
                 max(preferredSize.width, Self.minimumReadableWindowSize.width),
@@ -466,9 +481,23 @@ struct ChatWindowResolver {
                 min(Self.maximumAutomaticWindowSize.height, usableFrame.height)
             )
         )
-        let x = layoutMode == .right ? usableFrame.maxX - layoutSize.width : usableFrame.minX
+        let x = layoutMode.isRightAligned ? usableFrame.maxX - layoutSize.width : usableFrame.minX
         let y = min(max(currentFrame.minY, usableFrame.minY), usableFrame.maxY - layoutSize.height)
         return CGRect(origin: CGPoint(x: x, y: y), size: layoutSize)
+    }
+
+    private func splitLayoutFrame(in usableFrame: CGRect) -> CGRect {
+        let halfWidth = floor(usableFrame.width / 2)
+        let width = min(
+            max(halfWidth, min(Self.minimumSplitWindowSize.width, usableFrame.width)),
+            usableFrame.width
+        )
+        let height = min(
+            max(Self.minimumSplitWindowSize.height, usableFrame.height),
+            usableFrame.height
+        )
+        let x = layoutMode.isRightAligned ? usableFrame.maxX - width : usableFrame.minX
+        return CGRect(origin: CGPoint(x: x, y: usableFrame.minY), size: CGSize(width: width, height: height))
     }
 
     private func screenFrame(containing frame: CGRect) -> CGRect? {

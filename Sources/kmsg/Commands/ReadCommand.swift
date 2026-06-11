@@ -66,7 +66,7 @@ struct ReadCommand: ParsableCommand {
     )
     var deepRecovery: Bool = false
 
-    @Option(name: .long, help: "Window layout before reading: preserve, left, or right")
+    @Option(name: .long, help: "Window layout before reading: preserve, left, right, split-left, or split-right")
     var layout: ChatWindowLayoutMode = .preserve
 
     @Flag(name: .long, help: "Output in JSON format")
