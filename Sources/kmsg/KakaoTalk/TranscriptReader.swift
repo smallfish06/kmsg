@@ -5,17 +5,55 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
     let author: String?
     let timeRaw: String?
     let body: String
+    let imageCount: Int
+    let linkCount: Int
+    let attachmentCount: Int
     let isSystem: Bool
     let logicalTimestamp: Date?
     /// Calendar date of the message ("YYYY-MM-DD"), read from the time
     /// label's AXHelp tooltip. nil when the tooltip was unavailable.
     let date: String?
 
+    var hasImage: Bool {
+        imageCount > 0
+    }
+
+    var hasAttachment: Bool {
+        attachmentCount > 0
+    }
+
     enum CodingKeys: String, CodingKey {
         case author
         case timeRaw = "time_raw"
         case body
         case date
+        case hasImage = "has_image"
+        case imageCount = "image_count"
+        case linkCount = "link_count"
+        case hasAttachment = "has_attachment"
+        case attachmentCount = "attachment_count"
+    }
+
+    init(
+        author: String?,
+        timeRaw: String?,
+        body: String,
+        imageCount: Int = 0,
+        linkCount: Int = 0,
+        attachmentCount: Int = 0,
+        isSystem: Bool,
+        logicalTimestamp: Date?,
+        date: String? = nil
+    ) {
+        self.author = author
+        self.timeRaw = timeRaw
+        self.body = body
+        self.imageCount = max(0, imageCount)
+        self.linkCount = max(0, linkCount)
+        self.attachmentCount = max(0, attachmentCount)
+        self.isSystem = isSystem
+        self.logicalTimestamp = logicalTimestamp
+        self.date = date
     }
 
     func encode(to encoder: Encoder) throws {
@@ -24,6 +62,11 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         try container.encodeIfPresent(timeRaw, forKey: .timeRaw)
         try container.encode(body, forKey: .body)
         try container.encodeIfPresent(date, forKey: .date)
+        try container.encode(hasImage, forKey: .hasImage)
+        try container.encode(imageCount, forKey: .imageCount)
+        try container.encode(linkCount, forKey: .linkCount)
+        try container.encode(hasAttachment, forKey: .hasAttachment)
+        try container.encode(attachmentCount, forKey: .attachmentCount)
     }
 }
 
@@ -57,10 +100,16 @@ enum TranscriptReadError: LocalizedError {
 struct KakaoTalkTranscriptReader {
     private let kakao: KakaoTalkApp
     private let runner: AXActionRunner
+    private let interactionMode: ChatWindowInteractionMode
 
-    init(kakao: KakaoTalkApp, runner: AXActionRunner) {
+    init(
+        kakao: KakaoTalkApp,
+        runner: AXActionRunner,
+        interactionMode: ChatWindowInteractionMode = .allowUIAutomation
+    ) {
         self.kakao = kakao
         self.runner = runner
+        self.interactionMode = interactionMode
     }
 
     func readSnapshot(
@@ -70,7 +119,11 @@ struct KakaoTalkTranscriptReader {
         includeSystemMessages: Bool = false
     ) throws -> TranscriptSnapshot {
         let referenceDate = Date()
-        let messageContextResolver = MessageContextResolver(kakao: kakao, runner: runner)
+        let messageContextResolver = MessageContextResolver(
+            kakao: kakao,
+            runner: runner,
+            interactionMode: interactionMode
+        )
         guard let messageContext = messageContextResolver.resolve(in: window) else {
             throw TranscriptReadError.transcriptContextUnavailable
         }
@@ -260,6 +313,9 @@ struct KakaoTalkTranscriptReader {
                     author: nil,
                     timeRaw: analysis.timeRaw,
                     body: bodyCandidate.body,
+                    imageCount: analysis.imageCount,
+                    linkCount: analysis.linkCount,
+                    attachmentCount: analysis.attachmentCount,
                     isSystem: true,
                     logicalTimestamp: currentDateAnchor,
                     date: resolvedDate
@@ -292,6 +348,9 @@ struct KakaoTalkTranscriptReader {
                 author: author,
                 timeRaw: resolvedTime,
                 body: bodyCandidate.body,
+                imageCount: analysis.imageCount,
+                linkCount: analysis.linkCount,
+                attachmentCount: analysis.attachmentCount,
                 isSystem: false,
                 logicalTimestamp: logicalTimestamp(
                     for: resolvedTime,
@@ -338,12 +397,15 @@ struct KakaoTalkTranscriptReader {
         var buttonTitlesBuffer: [String] = []
         var imageFrames: [CGRect] = []
         var rowHelpDate: String?
+        var linkElementCount = 0
+        var urlTokenCount = 0
 
         for container in containers {
             var textAreas: [UIElement] = []
             var staticTexts: [UIElement] = []
             var images: [UIElement] = []
             var buttons: [UIElement] = []
+            var links: [UIElement] = []
 
             for child in container.children {
                 switch child.role {
@@ -355,6 +417,8 @@ struct KakaoTalkTranscriptReader {
                     images.append(child)
                 case kAXButtonRole:
                     buttons.append(child)
+                case kAXLinkRole:
+                    links.append(child)
                 default:
                     break
                 }
@@ -365,6 +429,7 @@ struct KakaoTalkTranscriptReader {
                 staticTexts.isEmpty ? kAXStaticTextRole : nil,
                 images.isEmpty ? kAXImageRole : nil,
                 buttons.isEmpty ? kAXButtonRole : nil,
+                links.isEmpty ? kAXLinkRole : nil,
             ].compactMap { $0 }
 
             if !missingRoles.isEmpty {
@@ -375,6 +440,7 @@ struct KakaoTalkTranscriptReader {
                         kAXStaticTextRole: 8,
                         kAXImageRole: 3,
                         kAXButtonRole: 6,
+                        kAXLinkRole: 6,
                     ],
                     maxNodes: 140
                 )
@@ -382,6 +448,7 @@ struct KakaoTalkTranscriptReader {
                 if staticTexts.isEmpty { staticTexts = found[kAXStaticTextRole] ?? [] }
                 if images.isEmpty { images = found[kAXImageRole] ?? [] }
                 if buttons.isEmpty { buttons = found[kAXButtonRole] ?? [] }
+                if links.isEmpty { links = found[kAXLinkRole] ?? [] }
             }
 
             for staticText in staticTexts {
@@ -391,12 +458,14 @@ struct KakaoTalkTranscriptReader {
                 let normalized = normalizeBodyText(staticText.stringValue)
                 guard !normalized.isEmpty else { continue }
                 metadataTokensBuffer.append(contentsOf: metadataTokens(from: normalized))
+                urlTokenCount += countURLTokens(in: normalized)
             }
 
             for button in buttons {
                 let title = normalizeBodyText(button.title)
                 guard !title.isEmpty else { continue }
                 buttonTitlesBuffer.append(title)
+                urlTokenCount += countURLTokens(in: title)
             }
 
             for image in images {
@@ -405,9 +474,12 @@ struct KakaoTalkTranscriptReader {
                 }
             }
 
+            linkElementCount += links.count
+
             for textArea in textAreas {
                 let normalized = normalizeBodyText(textArea.stringValue)
                 guard !normalized.isEmpty else { continue }
+                urlTokenCount += countURLTokens(in: normalized)
 
                 var resolved = normalized
                 if shouldPromoteLinkTitle(for: normalized),
@@ -426,6 +498,7 @@ struct KakaoTalkTranscriptReader {
 
             if textAreas.isEmpty, let linkOnlyText = bestLinkTitle(from: container) {
                 bodyCandidates.append(MessageBodyCandidate(body: linkOnlyText, frame: container.frame))
+                linkElementCount = max(linkElementCount, 1)
             }
         }
 
@@ -437,6 +510,16 @@ struct KakaoTalkTranscriptReader {
         let uniqueButtonTitles = deduplicatePreservingOrder(buttonTitlesBuffer)
         let metadata = parseRowMetadata(tokens: metadataTokensBuffer)
         let cachedRowFrame = frameCache.frame(of: row)
+        let messageImageFrames = likelyMessageImageFrames(
+            imageFrames,
+            bodyFrame: bestBody?.frame,
+            rowFrame: cachedRowFrame,
+            transcriptRoot: transcriptRoot
+        )
+        let imageCount = messageImageFrames.count
+        let attachmentMetadataCount = uniqueMetadataTokens.filter(isLikelyAttachmentMetadataToken).count
+        let attachmentActionCount = uniqueButtonTitles.filter(isLikelyAttachmentButtonTitle).count
+        let attachmentCount = imageCount + attachmentMetadataCount + attachmentActionCount
         let side = inferMessageSide(
             bodyFrame: bestBody?.frame,
             imageFrames: imageFrames,
@@ -455,6 +538,9 @@ struct KakaoTalkTranscriptReader {
             timeRaw: metadata.timeRaw,
             side: side,
             rowFrame: cachedRowFrame,
+            imageCount: imageCount,
+            linkCount: max(linkElementCount, urlTokenCount),
+            attachmentCount: attachmentCount,
             isSystemLikeRow: systemLikeRow,
             axHelpDate: rowHelpDate
         )
@@ -484,6 +570,7 @@ struct KakaoTalkTranscriptReader {
                     author: metadata.author,
                     timeRaw: metadata.timeRaw,
                     body: resolved,
+                    linkCount: countURLTokens(in: resolved),
                     isSystem: false,
                     logicalTimestamp: logicalTimestamp(
                         for: metadata.timeRaw,
@@ -506,6 +593,7 @@ struct KakaoTalkTranscriptReader {
                             author: nil,
                             timeRaw: nil,
                             body: title,
+                            linkCount: max(1, countURLTokens(in: title)),
                             isSystem: false,
                             logicalTimestamp: nil,
                             date: nil
@@ -652,6 +740,51 @@ struct KakaoTalkTranscriptReader {
             return true
         }
         return false
+    }
+
+    private func likelyMessageImageFrames(
+        _ imageFrames: [CGRect],
+        bodyFrame: CGRect?,
+        rowFrame: CGRect?,
+        transcriptRoot: UIElement
+    ) -> [CGRect] {
+        imageFrames.filter { frame in
+            isLikelyMessageImageFrame(
+                frame,
+                bodyFrame: bodyFrame,
+                rowFrame: rowFrame,
+                transcriptFrame: transcriptRoot.frame
+            )
+        }
+    }
+
+    private func isLikelyMessageImageFrame(
+        _ frame: CGRect,
+        bodyFrame: CGRect?,
+        rowFrame: CGRect?,
+        transcriptFrame: CGRect?
+    ) -> Bool {
+        guard frame.width >= 48, frame.height >= 48, frame.width * frame.height >= 2_304 else {
+            return false
+        }
+
+        if let bodyFrame,
+           frame.maxX + 10 < bodyFrame.minX,
+           frame.width <= 72,
+           frame.height <= 72
+        {
+            return false
+        }
+
+        if let rowFrame, !rowFrame.intersects(frame) {
+            return false
+        }
+
+        if let transcriptFrame, !transcriptFrame.intersects(frame) {
+            return false
+        }
+
+        return true
     }
 
     private func isLikelySystemRow(
@@ -998,6 +1131,22 @@ struct KakaoTalkTranscriptReader {
         return trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
     }
 
+    private func countURLTokens(in text: String) -> Int {
+        var count = 0
+        var searchRange = text.startIndex..<text.endIndex
+
+        while let range = text.range(
+            of: #"https?://\S+"#,
+            options: .regularExpression,
+            range: searchRange
+        ) {
+            count += 1
+            searchRange = range.upperBound..<text.endIndex
+        }
+
+        return count
+    }
+
     private func scoreBodyCandidate(_ text: String) -> Int {
         var score = min(text.count * 10, 500)
         if text.contains("\n") {
@@ -1067,6 +1216,9 @@ private struct RowAnalysis {
     let timeRaw: String?
     let side: MessageSide
     let rowFrame: CGRect?
+    let imageCount: Int
+    let linkCount: Int
+    let attachmentCount: Int
     let isSystemLikeRow: Bool
     let axHelpDate: String?
 

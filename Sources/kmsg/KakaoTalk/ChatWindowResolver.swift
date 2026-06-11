@@ -13,6 +13,11 @@ enum ChatWindowResolutionMethod {
     case openedViaSearch
 }
 
+enum ChatWindowInteractionMode {
+    case allowUIAutomation
+    case backgroundSafe
+}
+
 struct ChatWindowResolution {
     let window: UIElement
     let method: ChatWindowResolutionMethod
@@ -27,6 +32,7 @@ struct ChatWindowResolution {
 }
 
 private enum ChatWindowFailureCode: String {
+    case backgroundSafeBlocked = "BACKGROUND_SAFE_BLOCKED"
     case focusFail = "FOCUS_FAIL"
     case inputNotReflected = "INPUT_NOT_REFLECTED"
     case windowNotReady = "WINDOW_NOT_READY"
@@ -66,22 +72,29 @@ struct ChatWindowResolver {
     private let useCache: Bool
     private let deepRecoveryEnabled: Bool
     private let layoutMode: ChatWindowLayoutMode
+    private let interactionMode: ChatWindowInteractionMode
 
     init(
         kakao: KakaoTalkApp,
         runner: AXActionRunner,
         useCache: Bool = true,
         deepRecoveryEnabled: Bool = false,
-        layoutMode: ChatWindowLayoutMode = .preserve
+        layoutMode: ChatWindowLayoutMode = .preserve,
+        interactionMode: ChatWindowInteractionMode = .allowUIAutomation
     ) {
         self.kakao = kakao
         self.runner = runner
         self.useCache = useCache
         self.deepRecoveryEnabled = deepRecoveryEnabled
         self.layoutMode = layoutMode
+        self.interactionMode = interactionMode
     }
 
     func resolve(query: String) throws -> ChatWindowResolution {
+        if interactionMode == .backgroundSafe {
+            return try resolveExistingWindowOnly(query: query)
+        }
+
         let usableWindow = try requireUsableWindow()
 
         if let existingWindow = findMatchingChatWindow(in: kakao.windows, query: query) {
@@ -99,6 +112,10 @@ struct ChatWindowResolver {
     func resolve(chatID: String) throws -> ChatWindowResolution {
         guard let record = ChatIdentityRegistryStore.shared.record(for: chatID) else {
             throw KakaoTalkError.elementNotFound("Unknown chat_id '\(chatID)'. Run 'kmsg chats' first to refresh the local registry.")
+        }
+
+        if interactionMode == .backgroundSafe {
+            return try resolveExistingWindowOnly(query: record.displayName)
         }
 
         let usableWindow = try requireUsableWindow()
@@ -156,6 +173,26 @@ struct ChatWindowResolver {
         runner.log("close window: fallback via cmd+w")
         runner.pressCommandW()
         return waitForWindowClosed(window, label: "close via cmd+w")
+    }
+
+    private func resolveExistingWindowOnly(query: String) throws -> ChatWindowResolution {
+        if let existingWindow = findMatchingChatWindow(in: kakao.windows, query: query) {
+            runner.log("background-safe: matched already exposed chat window")
+            return ChatWindowResolution(window: existingWindow, method: .existingWindow)
+        }
+
+        if let focusedWindow = kakao.focusedWindow,
+           let title = focusedWindow.title,
+           scoreQueryMatch(query: query, candidateText: title) > 0
+        {
+            runner.log("background-safe: matched already focused chat window")
+            return ChatWindowResolution(window: focusedWindow, method: .existingWindow)
+        }
+
+        throw KakaoTalkError.elementNotFound(
+            "[\(ChatWindowFailureCode.backgroundSafeBlocked.rawValue)] No already exposed chat window matched '\(query)'. " +
+            "Background-safe mode does not activate KakaoTalk, open chat rows, search, resize, or close windows."
+        )
     }
 
     private func requireUsableWindow() throws -> UIElement {
@@ -335,6 +372,11 @@ struct ChatWindowResolver {
     }
 
     private func standardizeReadableWindow(_ window: UIElement, label: String) {
+        guard interactionMode != .backgroundSafe else {
+            runner.log("\(label): background-safe mode; preserving window focus, size, and position")
+            return
+        }
+
         kakao.activate()
         _ = tryRaiseWindow(window)
 

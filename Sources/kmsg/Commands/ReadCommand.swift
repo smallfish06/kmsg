@@ -26,6 +26,9 @@ struct ReadCommand: ParsableCommand {
               kmsg read <chat>
               kmsg read --chat-id <chat-id>
 
+            Use --background-safe to read only already exposed chat windows without launching,
+            activating, logging in, searching, opening rows, resizing, or closing windows.
+
             When author is "(me)", the message was sent by you.
             """
     )
@@ -47,6 +50,12 @@ struct ReadCommand: ParsableCommand {
 
     @Flag(name: [.short, .long], help: "Keep auto-opened chat window after read")
     var keepWindow: Bool = false
+
+    @Flag(
+        name: .long,
+        help: "Do not activate, search, open, resize, or close KakaoTalk windows; only read already exposed matching chat windows"
+    )
+    var backgroundSafe: Bool = false
 
     @Flag(
         name: .long,
@@ -83,14 +92,21 @@ struct ReadCommand: ParsableCommand {
         }
 
         let runner = AXActionRunner(traceEnabled: traceAX)
-        let kakao = try AuthBootstrap.requireAuthenticated(traceAX: traceAX)
+        let kakao = backgroundSafe
+            ? try KakaoTalkApp(autoLaunch: false)
+            : try AuthBootstrap.requireAuthenticated(traceAX: traceAX)
         let chatWindowResolver = ChatWindowResolver(
             kakao: kakao,
             runner: runner,
             deepRecoveryEnabled: deepRecovery,
-            layoutMode: layout
+            layoutMode: layout,
+            interactionMode: backgroundSafe ? .backgroundSafe : .allowUIAutomation
         )
-        let transcriptReader = KakaoTalkTranscriptReader(kakao: kakao, runner: runner)
+        let transcriptReader = KakaoTalkTranscriptReader(
+            kakao: kakao,
+            runner: runner,
+            interactionMode: backgroundSafe ? .backgroundSafe : .allowUIAutomation
+        )
 
         let resolution: ChatWindowResolution
         let requestedChat: String
@@ -106,9 +122,13 @@ struct ReadCommand: ParsableCommand {
         } catch {
             print("No chat window found for '\(requestedChat)'")
             print("Reason: \(error)")
-            print("\nAvailable windows:")
-            for (index, window) in kakao.windows.enumerated() {
-                print("  [\(index)] \(window.title ?? "(untitled)")")
+            if backgroundSafe {
+                print("Available windows: \(kakao.windows.count) title(s) hidden in background-safe mode")
+            } else {
+                print("\nAvailable windows:")
+                for (index, window) in kakao.windows.enumerated() {
+                    print("  [\(index)] \(window.title ?? "(untitled)")")
+                }
             }
             throw ExitCode.failure
         }
