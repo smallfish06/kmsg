@@ -43,6 +43,13 @@ class ReadBackgroundSafeContractTests(unittest.TestCase):
         self.assertIn("!backgroundSafe", source)
         self.assertIn('"background_safe": backgroundSafe', source)
 
+    def test_mcp_startup_skips_status_check_by_default(self) -> None:
+        source = MCP_SERVER_COMMAND.read_text(encoding="utf-8")
+
+        self.assertIn("KMSG_MCP_STARTUP_STATUS_CHECK", source)
+        self.assertIn('"status_check": "skipped"', source)
+        self.assertIn('run(["status"], timeoutSec: 15.0)', source)
+
     def test_split_layout_modes_support_marketing_workspaces(self) -> None:
         resolver_source = CHAT_WINDOW_RESOLVER.read_text(encoding="utf-8")
         read_source = READ_COMMAND.read_text(encoding="utf-8")

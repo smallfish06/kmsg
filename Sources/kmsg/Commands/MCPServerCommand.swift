@@ -146,6 +146,19 @@ private final class KmsgSubprocessRunner {
             )
         }
 
+        let env = ProcessInfo.processInfo.environment
+        let shouldRunStatusCheck = (env["KMSG_MCP_STARTUP_STATUS_CHECK"] ?? "false").lowercased() == "true"
+        if !shouldRunStatusCheck {
+            return (
+                true,
+                [
+                    "kmsg_bin": executablePath,
+                    "version": version.stdout.trimmingCharacters(in: .whitespacesAndNewlines),
+                    "status_check": "skipped",
+                ]
+            )
+        }
+
         let status = run(["status"], timeoutSec: 15.0)
         if status.returncode != 0 {
             return (
