@@ -35,6 +35,14 @@ class ReadBackgroundSafeContractTests(unittest.TestCase):
         self.assertIn("BACKGROUND_SAFE_BLOCKED", source)
         self.assertIn("background-safe mode; preserving window focus, size, and position", source)
 
+    def test_mcp_read_exposes_background_safe_without_ui_retry(self) -> None:
+        source = MCP_SERVER_COMMAND.read_text(encoding="utf-8")
+
+        self.assertIn('"background_safe"', source)
+        self.assertIn('command.append("--background-safe")', source)
+        self.assertIn("!backgroundSafe", source)
+        self.assertIn('"background_safe": backgroundSafe', source)
+
     def test_split_layout_modes_support_marketing_workspaces(self) -> None:
         resolver_source = CHAT_WINDOW_RESOLVER.read_text(encoding="utf-8")
         read_source = READ_COMMAND.read_text(encoding="utf-8")

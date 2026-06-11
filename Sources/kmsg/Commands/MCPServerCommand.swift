@@ -300,6 +300,11 @@ private final class KmsgMCPServer {
                             "default": deepRecoveryDefault,
                             "description": "Enable deep recovery mode for window resolution",
                         ],
+                        "background_safe": [
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Only read already exposed matching chat windows; do not launch, activate, search, resize, or close KakaoTalk windows",
+                        ],
                         "keep_window": [
                             "type": "boolean",
                             "default": false,
@@ -457,6 +462,7 @@ private final class KmsgMCPServer {
 
         let boundedLimit = max(1, min(limit, 100))
         let deepRecovery = boolValue(arguments["deep_recovery"], defaultValue: deepRecoveryDefault)
+        let backgroundSafe = boolValue(arguments["background_safe"], defaultValue: false)
         let keepWindow = boolValue(arguments["keep_window"], defaultValue: false)
         let traceAX = boolValue(arguments["trace_ax"], defaultValue: traceDefault)
         guard let layout = Self.validReadLayout(arguments["layout"] as? String ?? readLayoutDefault) else {
@@ -478,6 +484,7 @@ private final class KmsgMCPServer {
         }
         command.append(contentsOf: ["--json", "--limit", String(boundedLimit), "--layout", layout])
         if deepRecovery { command.append("--deep-recovery") }
+        if backgroundSafe { command.append("--background-safe") }
         if keepWindow { command.append("--keep-window") }
         if traceAX { command.append("--trace-ax") }
 
@@ -498,7 +505,7 @@ private final class KmsgMCPServer {
         if first.returncode != 0 {
             let combined = "\(first.stdout)\n\(first.stderr)"
             let code = extractErrorCode(combined)
-            if code == "CHAT_NOT_FOUND" && !deepRecovery {
+            if code == "CHAT_NOT_FOUND" && !deepRecovery && !backgroundSafe {
                 var retryCommand = command
                 retryCommand.append("--deep-recovery")
                 let retry = runner.run(retryCommand, timeoutSec: 15.0)
@@ -547,6 +554,7 @@ private final class KmsgMCPServer {
             "meta": [
                 "latency_ms": first.latencyMs,
                 "layout": layout,
+                "background_safe": backgroundSafe,
             ],
         ]
         if traceAX, !first.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
