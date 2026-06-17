@@ -146,6 +146,19 @@ private final class KmsgSubprocessRunner {
             )
         }
 
+        let env = ProcessInfo.processInfo.environment
+        let shouldRunStatusCheck = (env["KMSG_MCP_STARTUP_STATUS_CHECK"] ?? "false").lowercased() == "true"
+        if !shouldRunStatusCheck {
+            return (
+                true,
+                [
+                    "kmsg_bin": executablePath,
+                    "version": version.stdout.trimmingCharacters(in: .whitespacesAndNewlines),
+                    "status_check": "skipped",
+                ]
+            )
+        }
+
         let status = run(["status"], timeoutSec: 15.0)
         if status.returncode != 0 {
             return (
@@ -300,6 +313,11 @@ private final class KmsgMCPServer {
                             "default": deepRecoveryDefault,
                             "description": "Enable deep recovery mode for window resolution",
                         ],
+                        "background_safe": [
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Only read already exposed matching chat windows; do not launch, activate, search, resize, or close KakaoTalk windows",
+                        ],
                         "keep_window": [
                             "type": "boolean",
                             "default": false,
@@ -312,7 +330,7 @@ private final class KmsgMCPServer {
                         ],
                         "layout": [
                             "type": "string",
-                            "enum": ["preserve", "left", "right"],
+                            "enum": ["preserve", "left", "right", "split-left", "split-right"],
                             "default": readLayoutDefault,
                             "description": "Window layout before reading",
                         ],
@@ -457,13 +475,14 @@ private final class KmsgMCPServer {
 
         let boundedLimit = max(1, min(limit, 100))
         let deepRecovery = boolValue(arguments["deep_recovery"], defaultValue: deepRecoveryDefault)
+        let backgroundSafe = boolValue(arguments["background_safe"], defaultValue: false)
         let keepWindow = boolValue(arguments["keep_window"], defaultValue: false)
         let traceAX = boolValue(arguments["trace_ax"], defaultValue: traceDefault)
         guard let layout = Self.validReadLayout(arguments["layout"] as? String ?? readLayoutDefault) else {
             return errorPayload(
                 code: "INVALID_ARGUMENT",
-                message: "layout must be preserve, left, or right",
-                hint: "Use layout=preserve, layout=left, or layout=right.",
+                message: "layout must be preserve, left, right, split-left, or split-right",
+                hint: "Use layout=preserve, layout=left, layout=right, layout=split-left, or layout=split-right.",
                 rawStdout: "",
                 rawStderr: "",
                 latencyMs: 0
@@ -478,6 +497,7 @@ private final class KmsgMCPServer {
         }
         command.append(contentsOf: ["--json", "--limit", String(boundedLimit), "--layout", layout])
         if deepRecovery { command.append("--deep-recovery") }
+        if backgroundSafe { command.append("--background-safe") }
         if keepWindow { command.append("--keep-window") }
         if traceAX { command.append("--trace-ax") }
 
@@ -498,7 +518,7 @@ private final class KmsgMCPServer {
         if first.returncode != 0 {
             let combined = "\(first.stdout)\n\(first.stderr)"
             let code = extractErrorCode(combined)
-            if code == "CHAT_NOT_FOUND" && !deepRecovery {
+            if code == "CHAT_NOT_FOUND" && !deepRecovery && !backgroundSafe {
                 var retryCommand = command
                 retryCommand.append("--deep-recovery")
                 let retry = runner.run(retryCommand, timeoutSec: 15.0)
@@ -547,6 +567,7 @@ private final class KmsgMCPServer {
             "meta": [
                 "latency_ms": first.latencyMs,
                 "layout": layout,
+                "background_safe": backgroundSafe,
             ],
         ]
         if traceAX, !first.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -801,7 +822,7 @@ private final class KmsgMCPServer {
         guard let raw else { return nil }
         let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch normalized {
-        case "preserve", "left", "right":
+        case "preserve", "left", "right", "split-left", "split-right":
             return normalized
         default:
             return nil

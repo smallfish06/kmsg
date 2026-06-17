@@ -5,12 +5,27 @@ enum ChatWindowLayoutMode: String {
     case preserve
     case left
     case right
+    case splitLeft = "split-left"
+    case splitRight = "split-right"
+
+    var isRightAligned: Bool {
+        self == .right || self == .splitRight
+    }
+
+    var isSplit: Bool {
+        self == .splitLeft || self == .splitRight
+    }
 }
 
 enum ChatWindowResolutionMethod {
     case existingWindow
     case openedViaChatList
     case openedViaSearch
+}
+
+enum ChatWindowInteractionMode {
+    case allowUIAutomation
+    case backgroundSafe
 }
 
 struct ChatWindowResolution {
@@ -27,6 +42,7 @@ struct ChatWindowResolution {
 }
 
 private enum ChatWindowFailureCode: String {
+    case backgroundSafeBlocked = "BACKGROUND_SAFE_BLOCKED"
     case focusFail = "FOCUS_FAIL"
     case inputNotReflected = "INPUT_NOT_REFLECTED"
     case windowNotReady = "WINDOW_NOT_READY"
@@ -59,6 +75,7 @@ private struct SearchCandidate {
 
 struct ChatWindowResolver {
     private static let minimumReadableWindowSize = CGSize(width: 760, height: 900)
+    private static let minimumSplitWindowSize = CGSize(width: 520, height: 680)
     private static let maximumAutomaticWindowSize = CGSize(width: 1200, height: 1000)
 
     private let kakao: KakaoTalkApp
@@ -66,22 +83,29 @@ struct ChatWindowResolver {
     private let useCache: Bool
     private let deepRecoveryEnabled: Bool
     private let layoutMode: ChatWindowLayoutMode
+    private let interactionMode: ChatWindowInteractionMode
 
     init(
         kakao: KakaoTalkApp,
         runner: AXActionRunner,
         useCache: Bool = true,
         deepRecoveryEnabled: Bool = false,
-        layoutMode: ChatWindowLayoutMode = .preserve
+        layoutMode: ChatWindowLayoutMode = .preserve,
+        interactionMode: ChatWindowInteractionMode = .allowUIAutomation
     ) {
         self.kakao = kakao
         self.runner = runner
         self.useCache = useCache
         self.deepRecoveryEnabled = deepRecoveryEnabled
         self.layoutMode = layoutMode
+        self.interactionMode = interactionMode
     }
 
     func resolve(query: String) throws -> ChatWindowResolution {
+        if interactionMode == .backgroundSafe {
+            return try resolveExistingWindowOnly(query: query)
+        }
+
         let usableWindow = try requireUsableWindow()
 
         if let existingWindow = findMatchingChatWindow(in: kakao.windows, query: query) {
@@ -99,6 +123,10 @@ struct ChatWindowResolver {
     func resolve(chatID: String) throws -> ChatWindowResolution {
         guard let record = ChatIdentityRegistryStore.shared.record(for: chatID) else {
             throw KakaoTalkError.elementNotFound("Unknown chat_id '\(chatID)'. Run 'kmsg chats' first to refresh the local registry.")
+        }
+
+        if interactionMode == .backgroundSafe {
+            return try resolveExistingWindowOnly(query: record.displayName)
         }
 
         let usableWindow = try requireUsableWindow()
@@ -156,6 +184,26 @@ struct ChatWindowResolver {
         runner.log("close window: fallback via cmd+w")
         runner.pressCommandW()
         return waitForWindowClosed(window, label: "close via cmd+w")
+    }
+
+    private func resolveExistingWindowOnly(query: String) throws -> ChatWindowResolution {
+        if let existingWindow = findMatchingChatWindow(in: kakao.windows, query: query) {
+            runner.log("background-safe: matched already exposed chat window")
+            return ChatWindowResolution(window: existingWindow, method: .existingWindow)
+        }
+
+        if let focusedWindow = kakao.focusedWindow,
+           let title = focusedWindow.title,
+           scoreQueryMatch(query: query, candidateText: title) > 0
+        {
+            runner.log("background-safe: matched already focused chat window")
+            return ChatWindowResolution(window: focusedWindow, method: .existingWindow)
+        }
+
+        throw KakaoTalkError.elementNotFound(
+            "[\(ChatWindowFailureCode.backgroundSafeBlocked.rawValue)] No already exposed chat window matched '\(query)'. " +
+            "Background-safe mode does not activate KakaoTalk, open chat rows, search, resize, or close windows."
+        )
     }
 
     private func requireUsableWindow() throws -> UIElement {
@@ -335,6 +383,11 @@ struct ChatWindowResolver {
     }
 
     private func standardizeReadableWindow(_ window: UIElement, label: String) {
+        guard interactionMode != .backgroundSafe else {
+            runner.log("\(label): background-safe mode; preserving window focus, size, and position")
+            return
+        }
+
         kakao.activate()
         _ = tryRaiseWindow(window)
 
@@ -414,6 +467,10 @@ struct ChatWindowResolver {
             return nil
         }
 
+        if layoutMode.isSplit {
+            return splitLayoutFrame(in: usableFrame)
+        }
+
         let layoutSize = CGSize(
             width: min(
                 max(preferredSize.width, Self.minimumReadableWindowSize.width),
@@ -424,9 +481,23 @@ struct ChatWindowResolver {
                 min(Self.maximumAutomaticWindowSize.height, usableFrame.height)
             )
         )
-        let x = layoutMode == .right ? usableFrame.maxX - layoutSize.width : usableFrame.minX
+        let x = layoutMode.isRightAligned ? usableFrame.maxX - layoutSize.width : usableFrame.minX
         let y = min(max(currentFrame.minY, usableFrame.minY), usableFrame.maxY - layoutSize.height)
         return CGRect(origin: CGPoint(x: x, y: y), size: layoutSize)
+    }
+
+    private func splitLayoutFrame(in usableFrame: CGRect) -> CGRect {
+        let halfWidth = floor(usableFrame.width / 2)
+        let width = min(
+            max(halfWidth, min(Self.minimumSplitWindowSize.width, usableFrame.width)),
+            usableFrame.width
+        )
+        let height = min(
+            max(Self.minimumSplitWindowSize.height, usableFrame.height),
+            usableFrame.height
+        )
+        let x = layoutMode.isRightAligned ? usableFrame.maxX - width : usableFrame.minX
+        return CGRect(origin: CGPoint(x: x, y: usableFrame.minY), size: CGSize(width: width, height: height))
     }
 
     private func screenFrame(containing frame: CGRect) -> CGRect? {

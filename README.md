@@ -68,7 +68,9 @@ kmsg chats --json
 kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20
 kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --keep-window
 kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json
+kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json --background-safe
 kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --deep-recovery
+kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --layout split-right
 kmsg watch "본인, 친구, 또는 단톡방 이름"
 kmsg watch "본인, 친구, 또는 단톡방 이름" --json
 kmsg watch "본인, 친구, 또는 단톡방 이름" --json --poll-interval 0.5
@@ -87,7 +89,7 @@ kmsg status [--verbose]
 
 - `--verbose`: 상세 상태 출력
 
-`status`, `chats`, `read`, `send`, `send-image`, `watch`, `cache warmup`은 카카오톡 로그인이 풀려 있으면 저장된 자격 증명으로 자동 로그인을 시도합니다. 저장된 정보가 없거나 불완전하면 터미널에서 아이디/비밀번호를 입력받아 `~/.config/kmsg/credentials.json`에 저장하고, 비밀번호 암호키는 `~/.config/kmsg/credentials/`에 별도로 보관합니다.
+`status`, `chats`, `read`, `send`, `send-image`, `watch`, `cache warmup`은 카카오톡 로그인이 풀려 있으면 저장된 자격 증명으로 자동 로그인을 시도합니다. 저장된 정보가 없거나 불완전하면 터미널에서 아이디/비밀번호를 입력받아 `~/.config/kmsg/credentials.json`에 저장하고, 비밀번호 암호키는 `~/.config/kmsg/credentials/`에 별도로 보관합니다. 단, `read --background-safe`는 카카오톡 실행/활성화/자동 로그인을 하지 않습니다.
 
 ### auth login
 
@@ -117,14 +119,16 @@ kmsg chats [--verbose] [--limit <limit>] [--trace-ax] [--json] [--keep-window]
 ### read
 
 ```bash
-kmsg read <chat> [--limit <limit>] [--debug] [--trace-ax] [--keep-window] [--deep-recovery] [--json]
+kmsg read <chat> [--limit <limit>] [--debug] [--trace-ax] [--keep-window] [--background-safe] [--deep-recovery] [--layout <layout>] [--json]
 ```
 
 - `-l, --limit <limit>`: 최대 메시지 개수 (기본값: 20)
 - `--debug`: raw element 디버그 정보 출력
 - `--trace-ax`: AX 탐색/재시도 로그 출력
 - `-k, --keep-window`: 자동으로 연 채팅창과 리스트창 유지
+- `--background-safe`: 카카오톡 실행/활성화/자동 로그인/검색/채팅방 열기/창 크기 변경/자동 닫기를 하지 않고, 이미 노출된 매칭 채팅창만 읽음
 - `--deep-recovery`: 빠른 탐색 실패 시 deep recovery 수행
+- `--layout <layout>`: `preserve`, `left`, `right`, `split-left`, `split-right`. 마케팅 작업자가 브라우저/광고툴과 화면을 나눠 쓸 때는 `split-left` 또는 `split-right`를 사용
 - `--json`: JSON 형식으로 출력
 
 ### watch
@@ -218,6 +222,7 @@ kmsg help cache
 
 ```bash
 kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json
+kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json --background-safe
 ```
 
 ### 출력 형식
@@ -231,7 +236,12 @@ kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json
     {
       "author": "홍길동",
       "time_raw": "00:27",
-      "body": "밤이 깊었네"
+      "body": "밤이 깊었네",
+      "has_image": false,
+      "image_count": 0,
+      "link_count": 0,
+      "has_attachment": false,
+      "attachment_count": 0
     }
   ]
 }
@@ -291,17 +301,22 @@ kmsg mcp-server
 kmsg watch "채팅방 이름" --json
 ```
 
+```bash
+$HOME/.local/bin/kmsg mcp-server
+```
+
 OpenClaw MCP 설정 예시:
 
 ```json
 {
   "mcpServers": {
     "kmsg": {
-      "command": "kmsg",
+      "command": "$HOME/.local/bin/kmsg",
       "args": ["mcp-server"],
       "env": {
         "KMSG_DEFAULT_DEEP_RECOVERY": "false",
-        "KMSG_TRACE_DEFAULT": "false"
+        "KMSG_TRACE_DEFAULT": "false",
+        "KMSG_DEFAULT_READ_LAYOUT": "split-right"
       }
     }
   }

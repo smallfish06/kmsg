@@ -10,11 +10,18 @@ struct MessageContextResolver {
     private let kakao: KakaoTalkApp
     private let runner: AXActionRunner
     private let useCache: Bool
+    private let interactionMode: ChatWindowInteractionMode
 
-    init(kakao: KakaoTalkApp, runner: AXActionRunner, useCache: Bool = true) {
+    init(
+        kakao: KakaoTalkApp,
+        runner: AXActionRunner,
+        useCache: Bool = true,
+        interactionMode: ChatWindowInteractionMode = .allowUIAutomation
+    ) {
         self.kakao = kakao
         self.runner = runner
         self.useCache = useCache
+        self.interactionMode = interactionMode
     }
 
     func resolve(in chatWindow: UIElement) -> MessageTranscriptContext? {
@@ -95,9 +102,13 @@ struct MessageContextResolver {
                 return input
             }
 
-            kakao.activate()
-            _ = runner.focusWithVerification(chatWindow, label: "chat window", attempts: 1)
-            Thread.sleep(forTimeInterval: 0.05)
+            if interactionMode == .backgroundSafe {
+                runner.log("read: background-safe mode; skipping chat window activation fallback")
+            } else {
+                kakao.activate()
+                _ = runner.focusWithVerification(chatWindow, label: "chat window", attempts: 1)
+                Thread.sleep(forTimeInterval: 0.05)
+            }
         }
 
         let appCandidates = collectMessageInputCandidates(from: kakao.applicationElement, limit: 90)
