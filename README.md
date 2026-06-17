@@ -255,6 +255,9 @@ kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json --backgrou
 - `messages[].author`: 작성자 이름 (`(me)`는 내 메시지 또는 작성자 추론이 불가능한 경우)
 - `messages[].time_raw`: UI에서 읽힌 시각 문자열(없으면 `null`)
 - `messages[].body`: 메시지 본문
+- `messages[].has_image` / `image_count`: 메시지에 포함된 이미지 존재 여부와 개수
+- `messages[].link_count`: 본문에서 감지된 URL 링크 개수
+- `messages[].has_attachment` / `attachment_count`: 이미지를 **제외한** 파일 첨부(문서 등) 존재 여부와 개수. 이미지는 `image_count`로 별도 집계됩니다.
 
 ### 주의
 
@@ -315,6 +318,7 @@ OpenClaw MCP 설정 예시:
       "args": ["mcp-server"],
       "env": {
         "KMSG_DEFAULT_DEEP_RECOVERY": "false",
+        "KMSG_DEFAULT_BACKGROUND_SAFE": "false",
         "KMSG_TRACE_DEFAULT": "false",
         "KMSG_DEFAULT_READ_LAYOUT": "split-right"
       }
