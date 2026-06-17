@@ -294,8 +294,6 @@ kmsg watch "본인, 친구, 또는 단톡방 이름" --json
 - MCP: `kmsg_read`, `kmsg_send`, `kmsg_send_image`
 - 실시간 감시: `kmsg watch "<chat>" --json`
 
-공식 upstream 저장소는 `https://github.com/channprj/kmsg` 입니다. KangYu/Madstamp 운영에서는 upstream PR 전까지 패치 빌드를 `/Users/yu/.local/bin/kangyu`로 설치하고, MCP 서버 ID는 `kmsg.kangyu`를 사용합니다. GitHub 운영 fork는 `https://github.com/MadKangYu/kmsg-upstream-fork`이며, 개인 fork 미러는 `https://github.com/MadKangYu/kmsg` 입니다.
-
 즉, OpenClaw 연동은 보통 아래 두 프로세스로 구성합니다.
 
 ```bash
@@ -303,10 +301,8 @@ kmsg mcp-server
 kmsg watch "채팅방 이름" --json
 ```
 
-KangYu/Madstamp 운영 프로필에서는 다음처럼 실행 파일을 분리합니다.
-
 ```bash
-/Users/yu/.local/bin/kangyu mcp-server
+$HOME/.local/bin/kmsg mcp-server
 ```
 
 OpenClaw MCP 설정 예시:
@@ -314,8 +310,8 @@ OpenClaw MCP 설정 예시:
 ```json
 {
   "mcpServers": {
-    "kmsg.kangyu": {
-      "command": "/Users/yu/.local/bin/kangyu",
+    "kmsg": {
+      "command": "$HOME/.local/bin/kmsg",
       "args": ["mcp-server"],
       "env": {
         "KMSG_DEFAULT_DEEP_RECOVERY": "false",
