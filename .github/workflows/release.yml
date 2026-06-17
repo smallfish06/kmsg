@@ -232,10 +232,14 @@ jobs:
 
           python3 <<'PY' > "$TAG_FILE"
           import datetime as dt
+          import json
+          import os
           import re
           import subprocess
 
           KEEP_VERSIONS = 10
+          asset_name = os.environ["RELEASE_ASSET_NAME"]
+          repository = os.environ["GITHUB_REPOSITORY"]
           major_date_patch_pattern = re.compile(r"^v(\d+)\.(\d{2})(\d{2})(\d{2})\.(\d+)$")
           legacy_pattern = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
@@ -258,8 +262,23 @@ jobs:
 
               return None
 
-          tags = subprocess.check_output(["git", "tag", "--list"], text=True).splitlines()
-          release_tags = [tag for tag in tags if parse_release_tag(tag) is not None]
+          # Select candidates from published GitHub releases that actually ship
+          # the asset, not from raw git tags. A tag can exist without a release
+          # (e.g. a prior release run failed after tagging), and `gh release
+          # download` would then abort the step with "release not found".
+          jq_filter = (
+              '.[] | select((.draft | not) and '
+              '([.assets[].name] | index(%s))) | .tag_name' % json.dumps(asset_name)
+          )
+          output = subprocess.check_output(
+              ["gh", "api", "--paginate", f"repos/{repository}/releases", "--jq", jq_filter],
+              text=True,
+          )
+          release_tags = [
+              tag.strip()
+              for tag in output.splitlines()
+              if tag.strip() and parse_release_tag(tag.strip()) is not None
+          ]
           release_tags.sort(key=parse_release_tag, reverse=True)
           for tag in release_tags[:KEEP_VERSIONS]:
               print(tag)
