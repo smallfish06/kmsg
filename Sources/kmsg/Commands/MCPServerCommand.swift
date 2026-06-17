@@ -187,6 +187,7 @@ private final class KmsgMCPServer {
     private let protocolVersion = "2024-11-05"
     private let runner = KmsgSubprocessRunner()
     private let deepRecoveryDefault: Bool
+    private let backgroundSafeDefault: Bool
     private let traceDefault: Bool
     private let readLayoutDefault: String
     private let serverVersion: String
@@ -197,6 +198,7 @@ private final class KmsgMCPServer {
     init() {
         let env = ProcessInfo.processInfo.environment
         deepRecoveryDefault = (env["KMSG_DEFAULT_DEEP_RECOVERY"] ?? "false").lowercased() == "true"
+        backgroundSafeDefault = (env["KMSG_DEFAULT_BACKGROUND_SAFE"] ?? "false").lowercased() == "true"
         traceDefault = (env["KMSG_TRACE_DEFAULT"] ?? "false").lowercased() == "true"
         readLayoutDefault = Self.validReadLayout(env["KMSG_DEFAULT_READ_LAYOUT"]) ?? "preserve"
         serverVersion = env["KMSG_MCP_VERSION"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
@@ -315,7 +317,7 @@ private final class KmsgMCPServer {
                         ],
                         "background_safe": [
                             "type": "boolean",
-                            "default": false,
+                            "default": backgroundSafeDefault,
                             "description": "Only read already exposed matching chat windows; do not launch, activate, search, resize, or close KakaoTalk windows",
                         ],
                         "keep_window": [
@@ -475,7 +477,7 @@ private final class KmsgMCPServer {
 
         let boundedLimit = max(1, min(limit, 100))
         let deepRecovery = boolValue(arguments["deep_recovery"], defaultValue: deepRecoveryDefault)
-        let backgroundSafe = boolValue(arguments["background_safe"], defaultValue: false)
+        let backgroundSafe = boolValue(arguments["background_safe"], defaultValue: backgroundSafeDefault)
         let keepWindow = boolValue(arguments["keep_window"], defaultValue: false)
         let traceAX = boolValue(arguments["trace_ax"], defaultValue: traceDefault)
         guard let layout = Self.validReadLayout(arguments["layout"] as? String ?? readLayoutDefault) else {
