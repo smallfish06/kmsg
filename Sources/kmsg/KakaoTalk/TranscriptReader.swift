@@ -519,7 +519,8 @@ struct KakaoTalkTranscriptReader {
         let imageCount = messageImageFrames.count
         let attachmentMetadataCount = uniqueMetadataTokens.filter(isLikelyAttachmentMetadataToken).count
         let attachmentActionCount = uniqueButtonTitles.filter(isLikelyAttachmentButtonTitle).count
-        let attachmentCount = imageCount + attachmentMetadataCount + attachmentActionCount
+        // Attachments are non-image files; images are reported separately via imageCount.
+        let attachmentCount = attachmentMetadataCount + attachmentActionCount
         let side = inferMessageSide(
             bodyFrame: bestBody?.frame,
             imageFrames: imageFrames,
@@ -1131,20 +1132,11 @@ struct KakaoTalkTranscriptReader {
         return trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
     }
 
+    private static let urlRegex = try! NSRegularExpression(pattern: #"https?://\S+"#)
+
     private func countURLTokens(in text: String) -> Int {
-        var count = 0
-        var searchRange = text.startIndex..<text.endIndex
-
-        while let range = text.range(
-            of: #"https?://\S+"#,
-            options: .regularExpression,
-            range: searchRange
-        ) {
-            count += 1
-            searchRange = range.upperBound..<text.endIndex
-        }
-
-        return count
+        let range = NSRange(text.startIndex..., in: text)
+        return Self.urlRegex.numberOfMatches(in: text, range: range)
     }
 
     private func scoreBodyCandidate(_ text: String) -> Int {
