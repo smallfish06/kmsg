@@ -137,8 +137,10 @@ kmsg read <chat> [--limit <limit>] [--debug] [--trace-ax] [--keep-window] [--bac
 
 ```bash
 kmsg watch <chat> [--poll-interval <seconds>] [--trace-ax] [--keep-window] [--deep-recovery] [--json] [--include-system]
+kmsg watch --chat-id <chat-id> [--poll-interval <seconds>] [--trace-ax] [--keep-window] [--deep-recovery] [--json] [--include-system]
 ```
 
+- `--chat-id <chat-id>`: `kmsg chats`에서 출력된 `chat_id`로 감시
 - `--poll-interval <seconds>`: 폴링 주기 (기본값: `0.2`, 범위: `0.2...10.0`)
 - `--trace-ax`: AX 탐색/재시도 로그 출력
 - `-k, --keep-window`: 자동으로 연 채팅창 유지
@@ -368,6 +370,7 @@ OpenClaw MCP 설정 예시:
 
 상세 운영 가이드는 [docs/openclaw.md](./docs/openclaw.md) 를 참고하세요.
 설정 템플릿은 [docs/openclaw.mcp.example.json](./docs/openclaw.mcp.example.json) 에 있습니다.
+캐릭터 채팅 서비스의 오픈프로필/오픈채팅 인증 연동은 [docs/character-chat.md](./docs/character-chat.md) 를 참고하세요.
 
 기존 `tools/kmsg-mcp.py` 는 레거시/개발용 참조 구현으로 남아 있지만, 설치형 사용 흐름의 기본 진입점은 `kmsg mcp-server` 입니다.
 

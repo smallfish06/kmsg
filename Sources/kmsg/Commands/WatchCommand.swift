@@ -35,11 +35,19 @@ struct WatchCommand: ParsableCommand {
 
     static let configuration = CommandConfiguration(
         commandName: "watch",
-        abstract: "Watch a chat and print new messages in real time"
+        abstract: "Watch a chat and print new messages in real time",
+        discussion: """
+            Use either:
+              kmsg watch <chat>
+              kmsg watch --chat-id <chat-id>
+            """
     )
 
+    @Option(name: .long, help: "Watch using a chat_id from 'kmsg chats'")
+    var chatID: String?
+
     @Argument(help: "Name of the chat to watch (partial match supported)")
-    var chat: String
+    var chat: String?
 
     @Option(name: .long, help: "Polling interval in seconds")
     var pollInterval: Double = 0.2
@@ -65,6 +73,26 @@ struct WatchCommand: ParsableCommand {
     @Flag(name: .long, help: "Include system messages such as date separators")
     var includeSystem: Bool = false
 
+    private var targetDescription: String {
+        if let chatID {
+            return "chat_id '\(chatID)'"
+        }
+        return "'\(chat ?? "")'"
+    }
+
+    func validate() throws {
+        if let chatID, !chatID.isEmpty {
+            guard chat == nil else {
+                throw ValidationError("Chat name cannot be provided together with --chat-id.")
+            }
+            return
+        }
+
+        guard let chat, !chat.isEmpty else {
+            throw ValidationError("Chat name is required unless --chat-id is provided.")
+        }
+    }
+
     func run() throws {
         guard AccessibilityPermission.ensureGranted() else {
             AccessibilityPermission.printInstructions()
@@ -87,9 +115,13 @@ struct WatchCommand: ParsableCommand {
 
         let resolution: ChatWindowResolution
         do {
-            resolution = try chatWindowResolver.resolve(query: chat)
+            if let chatID, !chatID.isEmpty {
+                resolution = try chatWindowResolver.resolve(chatID: chatID)
+            } else {
+                resolution = try chatWindowResolver.resolve(query: chat ?? "")
+            }
         } catch {
-            print("No chat window found for '\(chat)'")
+            print("No chat window found for \(targetDescription)")
             print("Reason: \(error)")
             print("\nAvailable windows:")
             for (index, window) in kakao.windows.enumerated() {
@@ -99,14 +131,14 @@ struct WatchCommand: ParsableCommand {
         }
 
         var currentWindow = resolution.window
-        var currentChatTitle = currentWindow.title ?? chat
+        var currentChatTitle = currentWindow.title ?? chat ?? chatID ?? ""
         var autoOpenedWindow: UIElement? = resolution.openedTransiently ? currentWindow : nil
         var cachedContext: MessageTranscriptContext?
 
         defer {
             if !keepWindow, let autoOpenedWindow {
                 let resolvedTitle = autoOpenedWindow.title ?? ""
-                if !resolvedTitle.isEmpty && !resolvedTitle.localizedCaseInsensitiveContains(chat) {
+                if chatID == nil, let chat, !resolvedTitle.isEmpty && !resolvedTitle.localizedCaseInsensitiveContains(chat) {
                     runner.log("watch: skipped auto-close because resolved title '\(resolvedTitle)' did not match query")
                 } else if chatWindowResolver.closeWindow(autoOpenedWindow) {
                     runner.log("watch: auto-opened chat window closed")
@@ -164,6 +196,7 @@ struct WatchCommand: ParsableCommand {
                     currentWindow: &currentWindow,
                     currentChatTitle: &currentChatTitle,
                     autoOpenedWindow: &autoOpenedWindow,
+                    chatID: chatID,
                     snapshotLimit: snapshotLimit,
                     interval: interval,
                     cachedContext: &cachedContext
@@ -189,6 +222,7 @@ struct WatchCommand: ParsableCommand {
         currentWindow: inout UIElement,
         currentChatTitle: inout String,
         autoOpenedWindow: inout UIElement?,
+        chatID: String?,
         snapshotLimit: Int,
         interval: Double,
         cachedContext: inout MessageTranscriptContext?
@@ -220,9 +254,14 @@ struct WatchCommand: ParsableCommand {
         }
 
         runnerRecoveryLog("watch: in-place recovery failed; re-resolving chat window")
-        let resolution = try chatWindowResolver.resolve(query: chat)
+        let resolution: ChatWindowResolution
+        if let chatID, !chatID.isEmpty {
+            resolution = try chatWindowResolver.resolve(chatID: chatID)
+        } else {
+            resolution = try chatWindowResolver.resolve(query: chat ?? "")
+        }
         currentWindow = resolution.window
-        currentChatTitle = currentWindow.title ?? chat
+        currentChatTitle = currentWindow.title ?? chat ?? chatID ?? ""
         cachedContext = nil
         if resolution.openedTransiently {
             autoOpenedWindow = currentWindow
