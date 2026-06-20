@@ -63,7 +63,7 @@ kmsg send "본인, 친구, 또는 단톡방 이름" "$(date '+%Y-%m-%d %H:%M:%S'
 kmsg send "본인, 친구, 또는 단톡방 이름" "테스트" --keep-window
 kmsg send-image "본인, 친구, 또는 단톡방 이름" "/path/to/image.png"
 kmsg friend add --kakao-id "friend-id" --json --dry-run
-kmsg profile assign --friend "친구 이름" --profile "멀티프로필 이름" --json --dry-run
+kmsg open-profile start --profile "캐릭터 이름" --url "https://open.kakao.com/o/..." --json --dry-run
 kmsg mcp-server
 kmsg chats
 kmsg chats --json
@@ -191,19 +191,20 @@ kmsg friend add --kakao-id <kakao-id> [--json] [--dry-run] [--trace-ax]
 
 `friend add`는 macOS 카카오톡의 친구 추가 UI를 AX로 조작합니다. 카카오톡 UI 버전에 따라 버튼/문구가 달라질 수 있으므로, 실제 실행이 실패하면 `--trace-ax`와 `inspect`로 친구 추가 화면의 버튼 이름을 확인해야 합니다.
 
-### profile assign
+### open-profile start
 
 ```bash
-kmsg profile assign --friend <friend> --profile <profile> [--json] [--dry-run] [--trace-ax]
+kmsg open-profile start --profile <profile> --url <open-profile-url> [--message <message>] [--json] [--dry-run] [--trace-ax]
 ```
 
-- `--friend <friend>`: 멀티프로필을 적용할 친구 이름 또는 채팅 제목
-- `--profile <profile>`: 적용할 멀티프로필 이름
+- `--profile <profile>`: 캐릭터 또는 오픈프로필 표시 이름
+- `--url <open-profile-url>`: 캐릭터별 카카오톡 오픈프로필 URL (`https://open.kakao.com/o/...`)
+- `--message <message>`: 오픈프로필 채팅 진입 후 전송할 첫 메시지
 - `--json`: JSON 형식으로 출력
 - `--dry-run`: 실제 카카오톡 UI를 조작하지 않고 결과 형태만 출력
 - `--trace-ax`: AX 탐색/재시도 로그 출력
 
-`profile assign`은 친구 검색, 프로필/멀티프로필 설정 화면 진입, 프로필 선택을 AX로 시도합니다. 실제 UI 레이아웃은 계정/카카오톡 버전에 따라 달라질 수 있으므로 첫 live 실행은 테스트 계정에서 진행하는 것을 권장합니다.
+`open-profile start`는 친구 추가나 멀티프로필 변경 없이 캐릭터별 오픈프로필 URL을 열고, 가능하면 1:1 오픈채팅 진입 버튼을 눌러 채팅창을 준비합니다. `--message`가 있으면 채팅 입력창을 찾아 첫 메시지까지 전송합니다. 실제 UI 레이아웃은 계정/카카오톡 버전에 따라 달라질 수 있으므로 첫 live 실행은 테스트 오픈프로필에서 `--trace-ax`와 함께 진행하는 것을 권장합니다.
 
 ### inspect
 

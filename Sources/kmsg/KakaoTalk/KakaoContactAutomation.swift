@@ -14,8 +14,6 @@ private enum ContactAutomationFailureCode: String {
     case searchFieldNotFound = "SEARCH_FIELD_NOT_FOUND"
     case inputNotReflected = "INPUT_NOT_REFLECTED"
     case friendResultNotFound = "FRIEND_RESULT_NOT_FOUND"
-    case profileAssignUINotFound = "PROFILE_ASSIGN_UI_NOT_FOUND"
-    case profileNotFound = "PROFILE_NOT_FOUND"
 }
 
 struct KakaoContactAutomation {
@@ -39,15 +37,6 @@ struct KakaoContactAutomation {
         let friendName = resolveFriendDisplayName(in: resultRoot, fallback: kakaoID)
         try pressFriendAddConfirmation(in: resultRoot)
         return KakaoFriendAddResult(friendName: friendName, chatTitle: friendName, externalChatID: nil)
-    }
-
-    func assignMultiProfile(friend: String, profile: String) throws {
-        let rootWindow = try requireUsableWindow()
-        try navigateToFriends(in: rootWindow)
-        let friendRoot = try openFriendProfile(friend: friend, rootWindow: rootWindow)
-        let profileRoot = try openProfileAssignmentUI(from: friendRoot)
-        try selectProfile(named: profile, in: profileRoot)
-        confirmIfAvailable(in: currentRoot(preferred: profileRoot))
     }
 
     private func requireUsableWindow() throws -> UIElement {
@@ -120,63 +109,6 @@ struct KakaoContactAutomation {
             throw KakaoTalkError.actionFailed("[\(ContactAutomationFailureCode.friendAddUINotFound.rawValue)] Could not press friend add confirmation")
         }
         Thread.sleep(forTimeInterval: 0.2)
-    }
-
-    private func openFriendProfile(friend: String, rootWindow: UIElement) throws -> UIElement {
-        if let searchField = locateSearchField(in: currentRoot(preferred: rootWindow)) {
-            try setText(friend, on: searchField, label: "friend search field")
-            _ = runner.waitUntil(label: "friend search results", timeout: 1.0, pollInterval: 0.08) {
-                findTextCandidate(in: currentRoot(preferred: rootWindow), matching: friend) != nil
-            }
-        }
-
-        guard let candidate = findTextCandidate(in: currentRoot(preferred: rootWindow), matching: friend) else {
-            throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendResultNotFound.rawValue)] Friend '\(friend)' not found")
-        }
-        guard activate(candidate, label: "friend profile candidate") else {
-            throw KakaoTalkError.actionFailed("[\(ContactAutomationFailureCode.friendResultNotFound.rawValue)] Could not open friend profile for '\(friend)'")
-        }
-        return waitForNewRoot(after: rootWindow, label: "friend profile") ?? currentRoot(preferred: rootWindow)
-    }
-
-    private func openProfileAssignmentUI(from root: UIElement) throws -> UIElement {
-        let primaryPatterns = [
-            "멀티프로필", "multi profile", "multiprofile",
-            "프로필 변경", "프로필 설정", "profile"
-        ]
-        if let button = findButton(in: currentRoot(preferred: root), matching: primaryPatterns) ?? findStaticOrButton(in: currentRoot(preferred: root), matching: primaryPatterns) {
-            _ = activate(button, label: "multi-profile entry")
-            return waitForNewRoot(after: root, label: "multi-profile UI") ?? currentRoot(preferred: root)
-        }
-
-        let menuPatterns = ["더보기", "more", "메뉴", "menu", "관리", "settings"]
-        if let menuButton = findButton(in: currentRoot(preferred: root), matching: menuPatterns), activate(menuButton, label: "profile menu") {
-            Thread.sleep(forTimeInterval: 0.2)
-            if let button = findButton(in: currentRoot(preferred: root), matching: primaryPatterns) ?? findStaticOrButton(in: currentRoot(preferred: root), matching: primaryPatterns) {
-                _ = activate(button, label: "multi-profile entry")
-                return waitForNewRoot(after: root, label: "multi-profile UI") ?? currentRoot(preferred: root)
-            }
-        }
-
-        throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.profileAssignUINotFound.rawValue)] Multi-profile assignment UI not found")
-    }
-
-    private func selectProfile(named profile: String, in root: UIElement) throws {
-        let activeRoot = currentRoot(preferred: root)
-        guard let candidate = findTextCandidate(in: activeRoot, matching: profile) ?? findButton(in: activeRoot, matching: [profile]) else {
-            throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.profileNotFound.rawValue)] Profile '\(profile)' not found")
-        }
-        guard activate(candidate, label: "profile candidate") else {
-            throw KakaoTalkError.actionFailed("[\(ContactAutomationFailureCode.profileNotFound.rawValue)] Could not select profile '\(profile)'")
-        }
-        Thread.sleep(forTimeInterval: 0.2)
-    }
-
-    private func confirmIfAvailable(in root: UIElement) {
-        let patterns = ["확인", "적용", "완료", "저장", "ok", "apply", "done", "save"]
-        if let button = findButton(in: root, matching: patterns) {
-            _ = activate(button, label: "profile assignment confirmation")
-        }
     }
 
     private func requireBestTextInput(in root: UIElement, label: String) throws -> UIElement {
@@ -261,20 +193,6 @@ struct KakaoContactAutomation {
         }, limit: 80, maxNodes: 1_500)
         return candidates.map { element in
             (element: element, score: scoreElement(element, matching: patterns))
-        }
-        .filter { $0.score > 0 }
-        .sorted { lhs, rhs in lhs.score > rhs.score }
-        .first?.element
-    }
-
-    private func findTextCandidate(in root: UIElement, matching text: String) -> UIElement? {
-        let normalized = normalize(text)
-        let candidates = root.findAll(where: { element in
-            let role = element.role ?? ""
-            return role == kAXRowRole || role == kAXCellRole || role == kAXStaticTextRole || role == kAXButtonRole
-        }, limit: 100, maxNodes: 2_000)
-        return candidates.map { element in
-            (element: element, score: textMatchScore(query: normalized, candidate: normalize(elementText(element))))
         }
         .filter { $0.score > 0 }
         .sorted { lhs, rhs in lhs.score > rhs.score }
@@ -378,19 +296,6 @@ struct KakaoContactAutomation {
             score += 100
         }
         return score
-    }
-
-    private func textMatchScore(query: String, candidate: String) -> Int {
-        if candidate == query {
-            return 5_000
-        }
-        if candidate.contains(query) {
-            return 3_000
-        }
-        if query.contains(candidate), candidate.count >= 2 {
-            return 1_000
-        }
-        return 0
     }
 
     private func elementText(_ element: UIElement) -> String {
