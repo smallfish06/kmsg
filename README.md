@@ -62,6 +62,8 @@ kmsg send --chat-id "chat_7f42c5e1d9ab" "안녕하세요"
 kmsg send "본인, 친구, 또는 단톡방 이름" "$(date '+%Y-%m-%d %H:%M:%S') 테스트"
 kmsg send "본인, 친구, 또는 단톡방 이름" "테스트" --keep-window
 kmsg send-image "본인, 친구, 또는 단톡방 이름" "/path/to/image.png"
+kmsg friend add --kakao-id "friend-id" --json --dry-run
+kmsg profile assign --friend "친구 이름" --profile "멀티프로필 이름" --json --dry-run
 kmsg mcp-server
 kmsg chats
 kmsg chats --json
@@ -175,6 +177,33 @@ kmsg send-image <recipient> <image-path> [--trace-ax] [--no-cache] [--keep-windo
 - `--deep-recovery`: 빠른 탐색 실패 시 deep recovery 수행
 
 `send-image`는 기본적으로 전송 후 채팅창과 카톡 리스트창을 정리하고, `--keep-window`일 때만 둘 다 유지합니다. 확인 시트가 매우 빠르게 사라지거나 생략되는 경우도 성공으로 처리하도록 되어 있습니다.
+
+### friend add
+
+```bash
+kmsg friend add --kakao-id <kakao-id> [--json] [--dry-run] [--trace-ax]
+```
+
+- `--kakao-id <kakao-id>`: 친구 추가할 카카오톡 ID
+- `--json`: JSON 형식으로 출력
+- `--dry-run`: 실제 카카오톡 UI를 조작하지 않고 결과 형태만 출력
+- `--trace-ax`: AX 탐색/재시도 로그 출력
+
+`friend add`는 macOS 카카오톡의 친구 추가 UI를 AX로 조작합니다. 카카오톡 UI 버전에 따라 버튼/문구가 달라질 수 있으므로, 실제 실행이 실패하면 `--trace-ax`와 `inspect`로 친구 추가 화면의 버튼 이름을 확인해야 합니다.
+
+### profile assign
+
+```bash
+kmsg profile assign --friend <friend> --profile <profile> [--json] [--dry-run] [--trace-ax]
+```
+
+- `--friend <friend>`: 멀티프로필을 적용할 친구 이름 또는 채팅 제목
+- `--profile <profile>`: 적용할 멀티프로필 이름
+- `--json`: JSON 형식으로 출력
+- `--dry-run`: 실제 카카오톡 UI를 조작하지 않고 결과 형태만 출력
+- `--trace-ax`: AX 탐색/재시도 로그 출력
+
+`profile assign`은 친구 검색, 프로필/멀티프로필 설정 화면 진입, 프로필 선택을 AX로 시도합니다. 실제 UI 레이아웃은 계정/카카오톡 버전에 따라 달라질 수 있으므로 첫 live 실행은 테스트 계정에서 진행하는 것을 권장합니다.
 
 ### inspect
 
