@@ -84,12 +84,12 @@ scripts/headatever.sh set 2.260101.0    # set an explicit version
 
 The script refuses to recreate an existing tag or move the date backwards, so a
 bump always produces a unique, spec-valid version. Pushing the `v<version>` tag
-triggers `release.yml` (universal binary build + GitHub release + Homebrew tap
-sync). The script is vendored from the
+triggers `release.yml` (universal binary build + GitHub release asset upload).
+The script is vendored from the
 [Headatever](https://github.com/channprj/headatever) spec.
 
 ## Compatibility notes
 
 - Build-time version generation validates the `MAJOR.YYMMDD.PATCH_COUNT` format directly from `VERSION`.
 - Release automation resolves the Git tag from `VERSION` as `v{VERSION}`.
-- Homebrew tap sync supports the current format and still reads legacy semver tags during migration, so older exact-version formulas are not dropped immediately after the format switch.
+- Release automation validates the tag format before building and checks the built binary's `--version` against the tag.

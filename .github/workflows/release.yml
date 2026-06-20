@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v1.260424.0). Optional."
+        description: "Release tag (e.g. v1.260620.0). Optional."
         required: false
         type: string
 
@@ -19,8 +19,6 @@ jobs:
     runs-on: macos-14
     env:
       RELEASE_ASSET_NAME: kmsg-macos-universal
-      TAP_REPO: channprj/homebrew-tap
-      TAP_REPO_REF: main
 
     steps:
       - name: Checkout
@@ -76,7 +74,6 @@ jobs:
           import datetime as dt
           import os
           import re
-          import sys
 
           tag = os.environ["TAG"]
           match = re.fullmatch(r"v(\d+)\.(\d{2})(\d{2})(\d{2})\.(\d+)", tag)
@@ -113,8 +110,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # A dispatched explicit tag must be built from that tag's commit so the
-          # embedded BuildVersion (read from VERSION) matches the release tag.
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
             git checkout --force --detach "refs/tags/$TAG"
             echo "Building from tag $TAG ($(git rev-parse --short HEAD))"
@@ -152,8 +147,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The release asset must report the same version as the tag it ships
-          # under; otherwise the VERSION file did not reflect the release tag.
           EXPECTED="${TAG#v}"
           ACTUAL="$(./"$RELEASE_ASSET_NAME" --version | tr -d '[:space:]')"
 
@@ -170,196 +163,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          RELEASE_TARGET="$(git rev-parse HEAD)"
 
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" "$RELEASE_ASSET_NAME" --clobber
           else
-            gh release create "$TAG" "$RELEASE_ASSET_NAME" --title "$TAG" --generate-notes --target "$GITHUB_SHA"
+            gh release create "$TAG" "$RELEASE_ASSET_NAME" --title "$TAG" --generate-notes --target "$RELEASE_TARGET"
           fi
-
-      - name: Check Homebrew tap sync configuration
-        id: tap-sync
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          {
-            echo "## Homebrew tap sync"
-            echo "- Repository: $TAP_REPO"
-            echo "- Branch: $TAP_REPO_REF"
-            echo "- Policy: required"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          if [[ -z "${{ secrets.TAP_REPO_TOKEN }}" ]]; then
-            echo "::error::TAP_REPO_TOKEN is required for Homebrew tap sync."
-            {
-              echo "- Status: failed"
-              echo "- Reason: TAP_REPO_TOKEN is missing"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-
-          echo "enabled=true" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout tap repository
-        if: steps.tap-sync.outputs.enabled == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.TAP_REPO }}
-          token: ${{ secrets.TAP_REPO_TOKEN }}
-          ref: ${{ env.TAP_REPO_REF }}
-          path: tap-repo
-
-      - name: Build Homebrew release metadata
-        if: steps.tap-sync.outputs.enabled == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG_FILE: ${{ runner.temp }}/kmsg-homebrew-meta/tags.txt
-          JSON_FILE: ${{ runner.temp }}/kmsg-homebrew-meta/releases.json
-          DOWNLOAD_DIR: ${{ runner.temp }}/kmsg-homebrew-meta/downloads
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          TAG="${{ steps.meta.outputs.tag }}"
-          KEEP_VERSIONS=10
-          META_DIR="$RUNNER_TEMP/kmsg-homebrew-meta"
-          TAG_FILE="$META_DIR/tags.txt"
-          JSON_FILE="$META_DIR/releases.json"
-          DOWNLOAD_DIR="$META_DIR/downloads"
-
-          mkdir -p "$META_DIR" "$DOWNLOAD_DIR"
-
-          python3 <<'PY' > "$TAG_FILE"
-          import datetime as dt
-          import json
-          import os
-          import re
-          import subprocess
-
-          KEEP_VERSIONS = 10
-          asset_name = os.environ["RELEASE_ASSET_NAME"]
-          repository = os.environ["GITHUB_REPOSITORY"]
-          major_date_patch_pattern = re.compile(r"^v(\d+)\.(\d{2})(\d{2})(\d{2})\.(\d+)$")
-          legacy_pattern = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
-
-          def parse_release_tag(tag: str):
-              major_date_patch_match = major_date_patch_pattern.fullmatch(tag)
-              if major_date_patch_match is not None:
-                  major, year_suffix, month, day, patch_count = (int(part) for part in major_date_patch_match.groups())
-                  try:
-                      dt.date(2000 + year_suffix, month, day)
-                  except ValueError:
-                      return None
-                  if major < 1 or patch_count < 0:
-                      return None
-                  return (2, major, 2000 + year_suffix, month, day, patch_count)
-
-              legacy_match = legacy_pattern.fullmatch(tag)
-              if legacy_match is not None:
-                  major, minor, patch = (int(part) for part in legacy_match.groups())
-                  return (1, major, minor, patch, 0)
-
-              return None
-
-          # Select candidates from published GitHub releases that actually ship
-          # the asset, not from raw git tags. A tag can exist without a release
-          # (e.g. a prior release run failed after tagging), and `gh release
-          # download` would then abort the step with "release not found".
-          jq_filter = (
-              '.[] | select((.draft | not) and '
-              '([.assets[].name] | index(%s))) | .tag_name' % json.dumps(asset_name)
-          )
-          output = subprocess.check_output(
-              ["gh", "api", "--paginate", f"repos/{repository}/releases", "--jq", jq_filter],
-              text=True,
-          )
-          release_tags = [
-              tag.strip()
-              for tag in output.splitlines()
-              if tag.strip() and parse_release_tag(tag.strip()) is not None
-          ]
-          release_tags.sort(key=parse_release_tag, reverse=True)
-          for tag in release_tags[:KEEP_VERSIONS]:
-              print(tag)
-          PY
-
-          while IFS= read -r RELEASE_TAG; do
-            [[ -n "$RELEASE_TAG" ]] || continue
-            if [[ "$RELEASE_TAG" == "$TAG" ]]; then
-              cp "$RELEASE_ASSET_NAME" "$DOWNLOAD_DIR/$RELEASE_TAG-$RELEASE_ASSET_NAME"
-            else
-              gh release download "$RELEASE_TAG" \
-                --repo "$GITHUB_REPOSITORY" \
-                --pattern "$RELEASE_ASSET_NAME" \
-                --dir "$DOWNLOAD_DIR/$RELEASE_TAG"
-              mv "$DOWNLOAD_DIR/$RELEASE_TAG/$RELEASE_ASSET_NAME" "$DOWNLOAD_DIR/$RELEASE_TAG-$RELEASE_ASSET_NAME"
-              rmdir "$DOWNLOAD_DIR/$RELEASE_TAG"
-            fi
-          done < "$TAG_FILE"
-
-          python3 <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-
-          repository = os.environ["GITHUB_REPOSITORY"]
-          asset_name = os.environ["RELEASE_ASSET_NAME"]
-          tag_file = Path(os.environ["TAG_FILE"])
-          download_dir = Path(os.environ["DOWNLOAD_DIR"])
-          json_file = Path(os.environ["JSON_FILE"])
-
-          metadata = {}
-          for tag in tag_file.read_text(encoding="utf-8").splitlines():
-              if not tag:
-                  continue
-              version = tag.removeprefix("v")
-              asset_path = download_dir / f"{tag}-{asset_name}"
-              sha256 = hashlib.sha256(asset_path.read_bytes()).hexdigest()
-              metadata[tag] = {
-                  "url": f"https://github.com/{repository}/releases/download/{tag}/{asset_name}",
-                  "sha256": sha256,
-                  "version": version,
-              }
-
-          json_file.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-          PY
-
-      - name: Update Homebrew formulas
-        if: steps.tap-sync.outputs.enabled == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          TAP_DIR="$GITHUB_WORKSPACE/tap-repo"
-          TAG="${{ steps.meta.outputs.tag }}"
-
-          python3 tools/sync_homebrew_tap.py \
-            --tap-dir "$TAP_DIR" \
-            --asset-path "$GITHUB_WORKSPACE/$RELEASE_ASSET_NAME" \
-            --repository "$GITHUB_REPOSITORY" \
-            --current-tag "$TAG" \
-            --release-metadata-file "$RUNNER_TEMP/kmsg-homebrew-meta/releases.json" \
-            --keep-versions 10
-
-          cd "$TAP_DIR"
-          if git diff --quiet -- README.md Formula; then
-            echo "Homebrew tap already up-to-date."
-            {
-              echo "- Status: success"
-              echo "- Result: tap repository already up-to-date for $TAG"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md Formula
-          git commit -m "chore(tap): sync kmsg formulas for $TAG"
-          git push origin HEAD:"$TAP_REPO_REF"
-
-          {
-            echo "- Status: success"
-            echo "- Result: pushed tap updates for $TAG"
-          } >> "$GITHUB_STEP_SUMMARY"
