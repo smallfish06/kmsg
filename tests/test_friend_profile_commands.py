@@ -51,9 +51,17 @@ class FriendOpenProfileCommandContractTests(unittest.TestCase):
         source = OPEN_PROFILE_AUTOMATION.read_text(encoding="utf-8")
 
         self.assertIn("OPEN_PROFILE_URL_OPEN_FAILED", source)
+        self.assertIn("OPEN_PROFILE_LAUNCH_URL_RESOLVE_FAILED", source)
         self.assertIn("OPEN_PROFILE_WINDOW_NOT_READY", source)
         self.assertIn("MESSAGE_INPUT_NOT_FOUND", source)
         self.assertIn("startOpenProfile(profile:", source)
+        self.assertIn("let launchURL = try resolveLaunchURL(from: url)", source)
+        self.assertIn("NSWorkspace.shared.open(launchURL)", source)
+        self.assertIn("data-join-scheme", source)
+        self.assertIn("URLSession.shared.dataTask", source)
+        self.assertIn("let windowsBeforeOpen = kakao.windows", source)
+        self.assertIn("existingWindows.contains", source)
+        self.assertIn("!isExistingWindow && hasMessageInput", source)
 
 
 if __name__ == "__main__":

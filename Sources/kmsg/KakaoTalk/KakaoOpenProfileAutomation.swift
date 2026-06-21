@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices.HIServices
+import Dispatch
 import Foundation
 
 struct KakaoOpenProfileResult {
@@ -10,11 +11,29 @@ struct KakaoOpenProfileResult {
 }
 
 private enum OpenProfileAutomationFailureCode: String {
+    case launchURLResolveFailed = "OPEN_PROFILE_LAUNCH_URL_RESOLVE_FAILED"
     case urlOpenFailed = "OPEN_PROFILE_URL_OPEN_FAILED"
     case windowNotReady = "OPEN_PROFILE_WINDOW_NOT_READY"
     case messageInputNotFound = "MESSAGE_INPUT_NOT_FOUND"
     case inputNotReflected = "INPUT_NOT_REFLECTED"
     case enterNotEffective = "ENTER_NOT_EFFECTIVE"
+}
+
+private final class SynchronousURLResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Result<(Data, URLResponse?), Error>?
+
+    func store(_ result: Result<(Data, URLResponse?), Error>) {
+        lock.lock()
+        storage = result
+        lock.unlock()
+    }
+
+    func load() -> Result<(Data, URLResponse?), Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
 }
 
 struct KakaoOpenProfileAutomation {
@@ -27,11 +46,14 @@ struct KakaoOpenProfileAutomation {
     }
 
     func startOpenProfile(profile: String, url: URL, message: String?) throws -> KakaoOpenProfileResult {
-        guard NSWorkspace.shared.open(url) else {
-            throw KakaoTalkError.actionFailed("[\(OpenProfileAutomationFailureCode.urlOpenFailed.rawValue)] Could not open '\(url.absoluteString)'")
+        let windowsBeforeOpen = kakao.windows
+        let launchURL = try resolveLaunchURL(from: url)
+        runner.log("open profile: launching \(launchURL.absoluteString)")
+        guard NSWorkspace.shared.open(launchURL) else {
+            throw KakaoTalkError.actionFailed("[\(OpenProfileAutomationFailureCode.urlOpenFailed.rawValue)] Could not open '\(launchURL.absoluteString)' resolved from '\(url.absoluteString)'")
         }
 
-        let profileRoot = try waitForOpenProfileWindow(profile: profile)
+        let profileRoot = try waitForOpenProfileWindow(profile: profile, existingWindows: windowsBeforeOpen)
         let chatWindow = enterChatIfAvailable(from: profileRoot, profile: profile)
 
         if let message {
@@ -46,15 +68,120 @@ struct KakaoOpenProfileAutomation {
         )
     }
 
-    private func waitForOpenProfileWindow(profile: String) throws -> UIElement {
+    private func resolveLaunchURL(from url: URL) throws -> URL {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            return url
+        }
+
+        guard let launchURL = try fetchJoinScheme(from: url) else {
+            throw KakaoTalkError.actionFailed("[\(OpenProfileAutomationFailureCode.launchURLResolveFailed.rawValue)] Could not find a KakaoTalk join scheme in '\(url.absoluteString)'")
+        }
+        return launchURL
+    }
+
+    private func fetchJoinScheme(from url: URL) throws -> URL? {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 5.0
+        request.setValue("Mozilla/5.0 kmsg-open-profile", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try performSynchronousRequest(request, timeout: 6.0)
+        if let httpResponse = response as? HTTPURLResponse, !(200..<300).contains(httpResponse.statusCode) {
+            throw KakaoTalkError.actionFailed("[\(OpenProfileAutomationFailureCode.launchURLResolveFailed.rawValue)] Open Profile page returned HTTP \(httpResponse.statusCode)")
+        }
+
+        guard let html = String(data: data, encoding: .utf8) else {
+            throw KakaoTalkError.actionFailed("[\(OpenProfileAutomationFailureCode.launchURLResolveFailed.rawValue)] Open Profile page was not UTF-8")
+        }
+        return extractJoinScheme(from: html)
+    }
+
+    private func performSynchronousRequest(_ request: URLRequest, timeout: TimeInterval) throws -> (Data, URLResponse?) {
+        let semaphore = DispatchSemaphore(value: 0)
+        let resultBox = SynchronousURLResultBox()
+
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error {
+                resultBox.store(.failure(error))
+            } else {
+                resultBox.store(.success((data ?? Data(), response)))
+            }
+            semaphore.signal()
+        }
+        task.resume()
+
+        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+            task.cancel()
+            throw KakaoTalkError.actionFailed("[\(OpenProfileAutomationFailureCode.launchURLResolveFailed.rawValue)] Timed out fetching Open Profile page")
+        }
+
+        guard let result = resultBox.load() else {
+            throw KakaoTalkError.actionFailed("[\(OpenProfileAutomationFailureCode.launchURLResolveFailed.rawValue)] Open Profile page request did not complete")
+        }
+        return try result.get()
+    }
+
+    private func extractJoinScheme(from html: String) -> URL? {
+        let patterns = [
+            #"data-join-scheme\s*=\s*"([^"]+)""#,
+            #"data-join-scheme\s*=\s*'([^']+)'"#,
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let nsRange = NSRange(html.startIndex..<html.endIndex, in: html)
+            guard let match = regex.firstMatch(in: html, range: nsRange),
+                  match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: html)
+            else { continue }
+
+            let rawValue = decodeHTMLAttribute(String(html[range]))
+            guard let url = URL(string: rawValue), url.scheme?.lowercased() == "kakaoopen" else {
+                continue
+            }
+            return url
+        }
+
+        return nil
+    }
+
+    private func decodeHTMLAttribute(_ value: String) -> String {
+        var decoded = value
+        let replacements = [
+            ("&amp;", "&"),
+            ("&quot;", "\""),
+            ("&#34;", "\""),
+            ("&#39;", "'"),
+            ("&apos;", "'"),
+            ("&lt;", "<"),
+            ("&gt;", ">"),
+        ]
+        for (entity, character) in replacements {
+            decoded = decoded.replacingOccurrences(of: entity, with: character)
+        }
+        return decoded
+    }
+
+    private func waitForOpenProfileWindow(profile: String, existingWindows: [UIElement]) throws -> UIElement {
         var resolved: UIElement?
         let found = runner.waitUntil(label: "open profile window", timeout: 8.0, pollInterval: 0.2) {
             kakao.activate()
-            guard let root = currentRoot() else {
-                return false
+
+            for root in kakao.windows.reversed() {
+                let isExistingWindow = existingWindows.contains { existing in
+                    CFEqual(existing.axElement, root.axElement)
+                }
+                let hasOpenProfileText = containsText(profile, in: root) ||
+                    hasAnyText(in: root, matching: ["오픈프로필", "오픈채팅", "open profile", "open chat"])
+                let hasMessageInput = resolveMessageInputField(in: root) != nil
+
+                if hasOpenProfileText || (!isExistingWindow && hasMessageInput) {
+                    resolved = root
+                    return true
+                }
             }
-            resolved = root
-            return containsText(profile, in: root) || resolveMessageInputField(in: root) != nil || hasAnyText(in: root, matching: ["오픈프로필", "오픈채팅", "open profile", "open chat"])
+
+            return false
         }
 
         guard found, let resolved else {
