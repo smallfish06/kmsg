@@ -122,6 +122,9 @@ struct SendCommand: ParsableCommand {
             deepRecoveryEnabled: deepRecovery
         )
 
+        // Snapshot before resolution so auto-close only touches windows this send opened.
+        let chatListWasOpen = kakao.chatListWindow != nil
+
         do {
             runner.log("window strategy: focusedWindow -> mainWindow -> windows.first")
             let resolution: ChatWindowResolution
@@ -144,13 +147,18 @@ struct SendCommand: ParsableCommand {
                 }
             }
 
+            // Close on every exit path — a window left behind by a failed send
+            // breaks the next read/send that has to resolve windows around it.
+            defer {
+                closeWindowsIfNeeded(
+                    resolution: resolution,
+                    chatListWasOpen: chatListWasOpen,
+                    kakao: kakao,
+                    resolver: chatWindowResolver,
+                    runner: runner
+                )
+            }
             try sendMessageToWindow(resolution.window, kakao: kakao, runner: runner)
-            closeWindowsIfNeeded(
-                resolution: resolution,
-                kakao: kakao,
-                resolver: chatWindowResolver,
-                runner: runner
-            )
         } catch {
             print("Failed to send message: \(error)")
             throw ExitCode.failure
@@ -311,6 +319,7 @@ struct SendCommand: ParsableCommand {
 
     private func closeWindowsIfNeeded(
         resolution: ChatWindowResolution,
+        chatListWasOpen: Bool,
         kakao: KakaoTalkApp,
         resolver: ChatWindowResolver,
         runner: AXActionRunner
@@ -320,13 +329,18 @@ struct SendCommand: ParsableCommand {
             return
         }
 
-        if resolver.closeWindow(resolution.window) {
-            print("✓ Chat window closed.")
+        if resolution.openedTransiently {
+            if resolver.closeWindow(resolution.window) {
+                print("✓ Chat window closed.")
+            } else {
+                runner.log("send: close window could not be verified")
+            }
         } else {
-            runner.log("send: close window could not be verified")
+            runner.log("send: existing chat window left open (not opened by send)")
         }
 
-        if let listWindow = kakao.chatListWindow,
+        if !chatListWasOpen,
+           let listWindow = kakao.chatListWindow,
            !areSameAXElement(listWindow, resolution.window)
         {
             if resolver.closeWindow(listWindow) {

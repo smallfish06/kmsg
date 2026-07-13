@@ -232,6 +232,10 @@ struct AXActionRunner {
         pressKey(code: 13, flags: .maskCommand) // W
     }
 
+    func pressCommandTwo() {
+        pressKey(code: 19, flags: .maskCommand) // 2 — KakaoTalk: show chats tab/window
+    }
+
     func pressCommandA() {
         pressKey(code: 0, flags: .maskCommand) // A
     }

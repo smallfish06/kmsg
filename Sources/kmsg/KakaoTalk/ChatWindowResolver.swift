@@ -137,7 +137,7 @@ struct ChatWindowResolver {
             return ChatWindowResolution(window: existingWindow, method: .existingWindow)
         }
 
-        if let chatListWindow = kakao.chatListWindow,
+        if let chatListWindow = ensureChatListWindow(),
            let chatWindow = openChatListRow(chatID: chatID, query: query, in: chatListWindow, fallbackWindow: usableWindow)
         {
             standardizeReadableWindow(chatWindow, label: "opened chat window")
@@ -271,7 +271,7 @@ struct ChatWindowResolver {
     }
 
     private func selectSearchWindow(fallback: UIElement) -> UIElement {
-        if let chatListWindow = kakao.chatListWindow {
+        if let chatListWindow = ensureChatListWindow() {
             runner.log("search root selected: chatListWindow")
             return chatListWindow
         }
@@ -281,6 +281,35 @@ struct ChatWindowResolver {
         }
         runner.log("search root selected: fallback usable window")
         return fallback
+    }
+
+    /// The chat search field and chat rows live in the chat list window. When only
+    /// standalone chat windows are open (e.g. left behind by a previous send/read),
+    /// that window is gone and both the row scan and the search fallback would run
+    /// against a chat window, which cannot open other chats. KakaoTalk restores the
+    /// list window with ⌘2 (chats tab), so recover it before giving up.
+    private func ensureChatListWindow() -> UIElement? {
+        if let chatListWindow = kakao.chatListWindow {
+            return chatListWindow
+        }
+        guard interactionMode != .backgroundSafe else {
+            return nil
+        }
+
+        runner.log("chat list: window missing; restoring via cmd+2")
+        kakao.activate()
+        Thread.sleep(forTimeInterval: 0.08)
+        runner.pressCommandTwo()
+
+        var restored: UIElement?
+        _ = runner.waitUntil(label: "chat list window restore", timeout: 1.4, pollInterval: 0.08, evaluateAfterTimeout: false) {
+            restored = kakao.chatListWindow
+            return restored != nil
+        }
+        if restored == nil {
+            runner.log("chat list: restore via cmd+2 failed")
+        }
+        return restored
     }
 
     private func openChatViaSearch(query: String, in rootWindow: UIElement, fallbackWindow: UIElement) throws -> UIElement {
@@ -296,16 +325,34 @@ struct ChatWindowResolver {
 
         _ = runner.setTextWithVerification("", on: searchField, label: "search field clear", attempts: 1)
 
+        // KakaoTalk's chat search only reacts to real key events — injecting AXValue
+        // fills the field but never triggers the search, so the result list stays
+        // empty. Type the query; fall back to AXValue injection only if typing
+        // fails to reflect.
         let searchInputReady =
-            runner.setTextWithVerification(query, on: searchField, label: "search field input", attempts: 1) ||
-            runner.typeTextWithVerification(query, on: searchField, label: "search field input", attempts: 2)
+            runner.typeTextWithVerification(query, on: searchField, label: "search field input", attempts: 2) ||
+            runner.setTextWithVerification(query, on: searchField, label: "search field input", attempts: 1)
 
         guard searchInputReady else {
             runner.pressEscape()
             throw KakaoTalkError.actionFailed("[\(ChatWindowFailureCode.inputNotReflected.rawValue)] Search keyword was not entered")
         }
 
-        let matchingCandidates = waitForMatchingSearchResults(query: query, rootWindow: rootWindow)
+        var matchingCandidates = waitForMatchingSearchResults(query: query, rootWindow: rootWindow)
+        if matchingCandidates.isEmpty {
+            // Like the friend-add ID search, KakaoTalk's chat search commits on
+            // Enter — typing alone can leave the result list unpopulated.
+            runner.log("search: no candidates after typing; committing search via Enter")
+            if searchField.isFocused || runner.focusWithVerification(searchField, label: "search field commit", attempts: 1) {
+                runner.pressEnterKey()
+                // Enter can also open the top result outright; take that window if it matches.
+                if let opened = resolveOpenedChatWindowFast(query: query) {
+                    runner.log("search: Enter opened matching chat directly")
+                    return opened
+                }
+                matchingCandidates = waitForMatchingSearchResults(query: query, rootWindow: rootWindow)
+            }
+        }
         guard let matchingResult = pickBestSearchResult(from: matchingCandidates) else {
             runner.pressEscape()
             throw KakaoTalkError.elementNotFound("[\(ChatWindowFailureCode.searchMiss.rawValue)] No search result found for '\(query)'")
