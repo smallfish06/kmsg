@@ -81,8 +81,19 @@ struct KakaoContactAutomation {
         guard let addButton = findButton(in: currentRoot(preferred: rootWindow), matching: patterns) else {
             throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendAddUINotFound.rawValue)] Friend add button not found")
         }
-        guard activate(addButton, label: "friend add button") else {
-            throw KakaoTalkError.actionFailed("[\(ContactAutomationFailureCode.friendAddUINotFound.rawValue)] Could not open friend add UI")
+        // The toolbar person+ button ignores AXPress/Enter (custom KakaoTalk
+        // control) — only a real mouse click opens the popover. Try activate
+        // once, then click the button center, re-checking for the popover each
+        // time. addFriend's guard reports the final failure if it never opens.
+        for attempt in 0..<3 {
+            if attempt == 0 {
+                _ = activate(addButton, label: "friend add button")
+            } else if let frame = addButton.frame {
+                runner.mouseClick(at: CGPoint(x: frame.midX, y: frame.midY), label: "friend add button")
+            }
+            if waitForPopover(in: rootWindow) != nil {
+                return
+            }
         }
     }
 
@@ -251,6 +262,10 @@ struct KakaoContactAutomation {
             .filter { text in
                 guard text.count >= 2, text.count <= 40 else { return false }
                 let lower = text.lowercased()
+                // collectTexts includes AX identifiers ("_NS:37") and element
+                // refs — never display names. Drop them so the fallback (the
+                // kakao id) is used instead of a meaningless internal token.
+                if lower.hasPrefix("_ns:") || lower.hasPrefix("axuielement") { return false }
                 return !ignored.contains(where: { lower.contains($0) })
             }
 
