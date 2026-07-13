@@ -208,6 +208,10 @@ struct AXActionRunner {
         pressKey(code: 36)
     }
 
+    func pressEscapeKey() {
+        pressKey(code: 53)
+    }
+
     func pressDownArrowKey() {
         pressKey(code: 125)
     }

@@ -26,6 +26,13 @@ struct KakaoContactAutomation {
     }
 
     func addFriend(kakaoID: String) throws -> KakaoFriendAddResult {
+        // Whatever happens, close the popover (and any profile window the add
+        // opens) before returning: leftover windows block the next automation —
+        // kmsg send misreads them as a login screen ("Enter KakaoTalk credentials").
+        defer { dismissLeftoverUI() }
+        // Also clear anything a previous crashed run left open.
+        dismissLeftoverUI()
+
         let rootWindow = try requireUsableWindow()
         try navigateToFriends(in: rootWindow)
         try openFriendAddUI(from: rootWindow)
@@ -40,13 +47,28 @@ struct KakaoContactAutomation {
         let idRoot = waitForPopover(in: rootWindow) ?? popover
         let input = try requireBestTextInput(in: idRoot, label: "KakaoTalk ID input")
         try setText(kakaoID, on: input, label: "KakaoTalk ID input")
-        // triggerSearch already blocked until the result card (친구 추가 button)
-        // appeared, so a match is guaranteed here.
+        // triggerSearch blocks until a result card renders (its bottom button):
+        // 친구 추가 for a new contact, 1:1 채팅 when the id is already a friend.
         try triggerSearch(in: idRoot, input: input)
         let resultRoot = waitForPopover(in: rootWindow) ?? idRoot
         let friendName = resolveFriendDisplayName(in: resultRoot, fallback: kakaoID)
-        try pressFriendAddConfirmation(in: resultRoot)
+        // Already-friend cards have no 친구 추가 button — nothing to confirm; the
+        // resolved name is all the caller needs to open the chat.
+        if let addButton = bottomButton(in: resultRoot, matching: ["친구 추가"]) {
+            try pressFriendAddConfirmation(addButton)
+        } else {
+            runner.log("friend add: no add button on result card (already a friend); skipping confirm")
+        }
         return KakaoFriendAddResult(friendName: friendName, chatTitle: friendName, externalChatID: nil)
+    }
+
+    // ESC closes the friend-add popover and the profile window KakaoTalk opens
+    // after a successful add. Two presses with a beat between them cover both.
+    private func dismissLeftoverUI() {
+        runner.pressEscapeKey()
+        Thread.sleep(forTimeInterval: 0.15)
+        runner.pressEscapeKey()
+        Thread.sleep(forTimeInterval: 0.15)
     }
 
     private func requireUsableWindow() throws -> UIElement {
@@ -158,47 +180,36 @@ struct KakaoContactAutomation {
         // here and skips the Enter). Focus the field and press Enter.
         _ = runner.focusWithVerification(input, label: "KakaoTalk ID input", attempts: 2)
         runner.pressEnterKey()
-        // A hit renders a result card with its 친구 추가 button at the BOTTOM of
-        // the popover; before the result (or with no match) the only 친구 추가
-        // elements are the header static text and the 연락처/ID tab row near the
-        // top. Keying off a *bottom-half* add button avoids two failure modes we
-        // hit live: the no-result notice lingering in the AX tree after a card
-        // renders (false timeout), and a slow lookup letting a top tab element
-        // satisfy a plain button check before the card exists (early wrong
-        // click). Network lookup → wait generously; no bottom button → time out.
+        // A hit renders a result card whose action button sits at the BOTTOM of
+        // the popover: 친구 추가 for a new contact, 1:1 채팅 when the id is
+        // already a friend. Before the result (or with no match) the only
+        // matching elements are the header static text and the 연락처/ID tab row
+        // near the top. Keying off a *bottom-half* button avoids two failure
+        // modes hit live: the no-result notice lingering in the AX tree after a
+        // card renders (false timeout), and a slow lookup letting a top tab
+        // element satisfy a plain button check before the card exists (early
+        // wrong click). Network lookup → wait generously; nothing → time out.
         let found = runner.waitUntil(label: "friend search result", timeout: 8.0, pollInterval: 0.15) {
-            hasBottomAddButton(in: currentRoot(preferred: root))
+            bottomButton(in: currentRoot(preferred: root), matching: ["친구 추가", "1:1 채팅", "1:1"]) != nil
         }
         if !found {
             throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendResultNotFound.rawValue)] No user found for this KakaoTalk ID (it may not exist or the user disallows ID search)")
         }
     }
 
-    // True when a 친구 추가 button exists in the bottom half of the add popover —
-    // i.e. a result card is showing, not just the header/tab row.
-    private func hasBottomAddButton(in root: UIElement) -> Bool {
+    // Best-scored button in the bottom half of the add popover — i.e. on the
+    // result card, never the header/tab row at the top.
+    private func bottomButton(in root: UIElement, matching patterns: [String]) -> UIElement? {
         let popover = findPopover(in: root) ?? (root.role == "AXPopover" ? root : nil)
-        guard let popover, let pf = popover.frame else { return false }
+        guard let popover, let pf = popover.frame else { return nil }
         let threshold = pf.minY + pf.height * 0.5
         let buttons = popover.findAll(where: { ($0.role ?? "") == kAXButtonRole }, limit: 48, maxNodes: 1_200)
-        return buttons.contains { button in
-            scoreElement(button, matching: ["친구 추가"]) > 100 && (button.frame?.minY ?? 0) > threshold
-        }
+        return buttons
+            .filter { ($0.frame?.minY ?? 0) > threshold && $0.isEnabled && scoreElement($0, matching: patterns) > 100 }
+            .max { scoreElement($0, matching: patterns) < scoreElement($1, matching: patterns) }
     }
 
-    private func pressFriendAddConfirmation(in root: UIElement) throws {
-        let patterns = ["친구 추가", "추가", "add friend", "add", "확인", "confirm"]
-        // The result card's 친구 추가 button sits at the bottom of the popover;
-        // the 연락처/ID tab row is near the top. findButton returns the highest-
-        // scored match, which on some layouts is a tab — so among all matches
-        // pick the lowest one (largest minY) to avoid clicking a tab instead.
-        let candidates = root
-            .findAll(where: { ($0.role ?? "") == kAXButtonRole || ($0.role ?? "") == "AXMenuButton" }, limit: 48, maxNodes: 1_200)
-            .filter { $0.isEnabled && scoreElement($0, matching: patterns) > 100 }
-        guard let button = candidates.max(by: { ($0.frame?.minY ?? 0) < ($1.frame?.minY ?? 0) }) else {
-            runner.log("friend add: no explicit add button found; assuming existing friend or auto-added result")
-            return
-        }
+    private func pressFriendAddConfirmation(_ button: UIElement) throws {
         // Like the other popover controls, the confirm button ignores AXPress/
         // Enter — a real mouse click at its center is what commits the add.
         if let frame = button.frame {
