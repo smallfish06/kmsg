@@ -158,23 +158,44 @@ struct KakaoContactAutomation {
         // here and skips the Enter). Focus the field and press Enter.
         _ = runner.focusWithVerification(input, label: "KakaoTalk ID input", attempts: 2)
         runner.pressEnterKey()
-        // A search hit renders a 친구 추가 *button* in the ID-tab popover — absent
-        // before the search, and distinct from the popover's static-text header
-        // of the same name. (The no-result notice can linger in the AX tree even
-        // after a card appears, so keying off the button is more reliable.) It's
-        // a network lookup that can take a few seconds, so wait generously; a
-        // genuinely absent/private id never renders the button → we time out.
+        // A hit renders a result card with its 친구 추가 button at the BOTTOM of
+        // the popover; before the result (or with no match) the only 친구 추가
+        // elements are the header static text and the 연락처/ID tab row near the
+        // top. Keying off a *bottom-half* add button avoids two failure modes we
+        // hit live: the no-result notice lingering in the AX tree after a card
+        // renders (false timeout), and a slow lookup letting a top tab element
+        // satisfy a plain button check before the card exists (early wrong
+        // click). Network lookup → wait generously; no bottom button → time out.
         let found = runner.waitUntil(label: "friend search result", timeout: 8.0, pollInterval: 0.15) {
-            findButton(in: currentRoot(preferred: root), matching: ["친구 추가"]) != nil
+            hasBottomAddButton(in: currentRoot(preferred: root))
         }
         if !found {
             throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendResultNotFound.rawValue)] No user found for this KakaoTalk ID (it may not exist or the user disallows ID search)")
         }
     }
 
+    // True when a 친구 추가 button exists in the bottom half of the add popover —
+    // i.e. a result card is showing, not just the header/tab row.
+    private func hasBottomAddButton(in root: UIElement) -> Bool {
+        let popover = findPopover(in: root) ?? (root.role == "AXPopover" ? root : nil)
+        guard let popover, let pf = popover.frame else { return false }
+        let threshold = pf.minY + pf.height * 0.5
+        let buttons = popover.findAll(where: { ($0.role ?? "") == kAXButtonRole }, limit: 48, maxNodes: 1_200)
+        return buttons.contains { button in
+            scoreElement(button, matching: ["친구 추가"]) > 100 && (button.frame?.minY ?? 0) > threshold
+        }
+    }
+
     private func pressFriendAddConfirmation(in root: UIElement) throws {
         let patterns = ["친구 추가", "추가", "add friend", "add", "확인", "confirm"]
-        guard let button = findButton(in: root, matching: patterns) else {
+        // The result card's 친구 추가 button sits at the bottom of the popover;
+        // the 연락처/ID tab row is near the top. findButton returns the highest-
+        // scored match, which on some layouts is a tab — so among all matches
+        // pick the lowest one (largest minY) to avoid clicking a tab instead.
+        let candidates = root
+            .findAll(where: { ($0.role ?? "") == kAXButtonRole || ($0.role ?? "") == "AXMenuButton" }, limit: 48, maxNodes: 1_200)
+            .filter { $0.isEnabled && scoreElement($0, matching: patterns) > 100 }
+        guard let button = candidates.max(by: { ($0.frame?.minY ?? 0) < ($1.frame?.minY ?? 0) }) else {
             runner.log("friend add: no explicit add button found; assuming existing friend or auto-added result")
             return
         }
