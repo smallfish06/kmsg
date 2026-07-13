@@ -102,8 +102,33 @@ struct KakaoContactAutomation {
         // "id" as an exact-match pattern (scoreElement weights == over contains)
         // selects it. The longer strings cover older/localized builds.
         let patterns = ["id", "카카오톡 id", "카카오톡ID", "카카오 id", "kakao id", "kakaotalk id", "id로", "아이디"]
-        if let button = findButton(in: root, matching: patterns) ?? findStaticOrButton(in: root, matching: patterns) {
-            _ = activate(button, label: "KakaoTalk ID mode")
+        guard let button = findButton(in: root, matching: patterns) ?? findStaticOrButton(in: root, matching: patterns) else {
+            return
+        }
+        // Like the person+ button, this tab ignores AXPress/Enter — activate()
+        // only focuses it, leaving the popover on the 연락처 (name/phone) tab so
+        // the id is searched there and never resolves. A real mouse click at the
+        // tab's center actually switches to ID mode; retry until the ID field's
+        // "친구 카카오톡 ID" placeholder appears.
+        for attempt in 0..<3 {
+            if attempt == 0 {
+                _ = activate(button, label: "KakaoTalk ID mode")
+            } else if let frame = button.frame {
+                runner.mouseClick(at: CGPoint(x: frame.midX, y: frame.midY), label: "KakaoTalk ID mode")
+            }
+            let switched = runner.waitUntil(label: "KakaoTalk ID mode active", timeout: 0.6, pollInterval: 0.05) {
+                hasIdPlaceholder(in: currentRoot(preferred: root))
+            }
+            if switched { return }
+        }
+    }
+
+    private func hasIdPlaceholder(in root: UIElement) -> Bool {
+        let fields = root.findAll(where: { ($0.role ?? "") == kAXTextFieldRole }, limit: 12, maxNodes: 400)
+        return fields.contains { field in
+            let placeholder: String? = field.attributeOptional(kAXPlaceholderValueAttribute)
+            let lower = (placeholder ?? "").lowercased()
+            return lower.contains("id") || lower.contains("아이디")
         }
     }
 
