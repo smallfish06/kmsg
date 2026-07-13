@@ -245,6 +245,22 @@ final class KakaoTalkAuthenticator {
             if !loginLike {
                 return true
             }
+            // A leftover popover/sheet (e.g. an aborted friend-add) makes the
+            // logged-in main window read as a login screen. Dismiss it and
+            // re-check once before concluding we're logged out; ESC on a real
+            // login window is harmless.
+            runner.log("auth: login-like window; dismissing possible leftover popover and re-checking")
+            kakao.activate()
+            runner.pressEscapeKey()
+            Thread.sleep(forTimeInterval: 0.2)
+            runner.pressEscapeKey()
+            Thread.sleep(forTimeInterval: 0.3)
+            if let rechecked = kakao.ensureMainWindow(timeout: 0.6, mode: .fast, trace: { [self] message in
+                self.runner.log("auth: \(message)")
+            }), !isLikelyLoginWindow(rechecked) {
+                runner.log("auth: authenticated after dismissing leftover UI")
+                return true
+            }
         }
 
         return false

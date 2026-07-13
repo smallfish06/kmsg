@@ -4,6 +4,14 @@ import Foundation
 
 enum PasswordPrompt {
     static func promptForCredentials(defaultIdentifier: String?) throws -> DecryptedCredentials {
+        // Non-interactive callers (the talkfriend bridge, cron) can never answer
+        // this prompt — without this check they hang on readLine until killed.
+        guard isatty(STDIN_FILENO) == 1 else {
+            throw ValidationError(
+                "KakaoTalk session looks logged out and no terminal is attached for credentials. " +
+                    "Run `kmsg auth login` interactively, or dismiss any leftover KakaoTalk popover."
+            )
+        }
         FileHandle.standardOutput.write(Data("Enter KakaoTalk credentials.\n".utf8))
         fflush(stdout)
 
