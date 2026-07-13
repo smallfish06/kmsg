@@ -29,11 +29,17 @@ struct KakaoContactAutomation {
         let rootWindow = try requireUsableWindow()
         try navigateToFriends(in: rootWindow)
         let addRoot = try openFriendAddUI(from: rootWindow)
-        try selectKakaoIDMode(in: addRoot)
-        let input = try requireBestTextInput(in: currentRoot(preferred: addRoot), label: "KakaoTalk ID input")
+        // Friend-add happens entirely inside an AXPopover. Scope every step to
+        // it: the main window also holds a "내 기본프로필" search field, and
+        // without scoping the input lookup grabs that instead of the ID field.
+        let popover = waitForPopover(in: rootWindow) ?? addRoot
+        try selectKakaoIDMode(in: popover)
+        // Re-fetch after the mode switch swaps the popover's contents.
+        let idRoot = waitForPopover(in: rootWindow) ?? popover
+        let input = try requireBestTextInput(in: idRoot, label: "KakaoTalk ID input")
         try setText(kakaoID, on: input, label: "KakaoTalk ID input")
-        try triggerSearch(in: currentRoot(preferred: addRoot), input: input)
-        let resultRoot = currentRoot(preferred: addRoot)
+        try triggerSearch(in: idRoot, input: input)
+        let resultRoot = waitForPopover(in: rootWindow) ?? idRoot
         let friendName = resolveFriendDisplayName(in: resultRoot, fallback: kakaoID)
         try pressFriendAddConfirmation(in: resultRoot)
         return KakaoFriendAddResult(friendName: friendName, chatTitle: friendName, externalChatID: nil)
@@ -78,15 +84,35 @@ struct KakaoContactAutomation {
     }
 
     private func selectKakaoIDMode(in root: UIElement) throws {
-        let patterns = ["카카오톡 id", "카카오톡ID", "카카오 id", "kakao id", "kakaotalk id", "id로", "아이디"]
-        if let button = findButton(in: currentRoot(preferred: root), matching: patterns) ?? findStaticOrButton(in: currentRoot(preferred: root), matching: patterns) {
+        // The mode tab is a plain button titled exactly "ID" (KakaoTalk desktop);
+        // "id" as an exact-match pattern (scoreElement weights == over contains)
+        // selects it. The longer strings cover older/localized builds.
+        let patterns = ["id", "카카오톡 id", "카카오톡ID", "카카오 id", "kakao id", "kakaotalk id", "id로", "아이디"]
+        if let button = findButton(in: root, matching: patterns) ?? findStaticOrButton(in: root, matching: patterns) {
             _ = activate(button, label: "KakaoTalk ID mode")
         }
     }
 
+    // Friend-add UI is an AXPopover inside the main window, not a separate
+    // window — waitForNewRoot never sees it. Poll for it so we can scope input/
+    // button lookups to the popover instead of the whole window.
+    private func waitForPopover(in root: UIElement) -> UIElement? {
+        var popover: UIElement?
+        _ = runner.waitUntil(label: "friend add popover", timeout: 1.0, pollInterval: 0.05) {
+            popover = findPopover(in: root) ?? kakao.mainWindow.flatMap { findPopover(in: $0) }
+            return popover != nil
+        }
+        return popover
+    }
+
+    private func findPopover(in root: UIElement) -> UIElement? {
+        if root.role == "AXPopover" { return root }
+        return root.findFirst { $0.role == "AXPopover" }
+    }
+
     private func triggerSearch(in root: UIElement, input: UIElement) throws {
         let patterns = ["검색", "search", "확인", "다음", "next"]
-        if let button = findButton(in: currentRoot(preferred: root), matching: patterns) {
+        if let button = findButton(in: root, matching: patterns) {
             _ = activate(button, label: "friend search button")
         } else if runner.focusWithVerification(input, label: "KakaoTalk ID input", attempts: 1) {
             runner.pressEnterKey()
@@ -131,11 +157,15 @@ struct KakaoContactAutomation {
     }
 
     private func locateSearchField(in root: UIElement) -> UIElement? {
-        if let focused = kakao.applicationElement.focusedUIElement, isTextInput(focused) {
+        let inputs = root.findAll(where: { isTextInput($0) }, limit: 24, maxNodes: 600)
+        // Prefer the focused input only when it's inside this scope (the
+        // popover). Otherwise the app-wide focused field can be the main
+        // window's "내 기본프로필" search box, which must not be used here.
+        if let focused = kakao.applicationElement.focusedUIElement, isTextInput(focused),
+            inputs.contains(where: { sameElement($0, focused) }) {
             return focused
         }
 
-        let inputs = root.findAll(where: { isTextInput($0) }, limit: 24, maxNodes: 600)
         let scored = inputs.map { input in
             (input: input, score: scoreTextInput(input))
         }.sorted { lhs, rhs in lhs.score > rhs.score }
