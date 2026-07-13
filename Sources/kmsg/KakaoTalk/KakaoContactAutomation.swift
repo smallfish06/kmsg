@@ -42,6 +42,12 @@ struct KakaoContactAutomation {
         try setText(kakaoID, on: input, label: "KakaoTalk ID input")
         try triggerSearch(in: idRoot, input: input)
         let resultRoot = waitForPopover(in: rootWindow) ?? idRoot
+        // No match: the popover keeps its "검색을 허용한 친구만 찾을 수 있습니다"
+        // notice (id not found, or the user disallows ID search). Without this
+        // check the header "친구 추가" reads as a result and we falsely report ok.
+        if hasNoResultNotice(in: resultRoot) {
+            throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendResultNotFound.rawValue)] No user found for this KakaoTalk ID (it may not exist or the user disallows ID search)")
+        }
         let friendName = resolveFriendDisplayName(in: resultRoot, fallback: kakaoID)
         try pressFriendAddConfirmation(in: resultRoot)
         return KakaoFriendAddResult(friendName: friendName, chatTitle: friendName, externalChatID: nil)
@@ -281,9 +287,13 @@ struct KakaoContactAutomation {
             return role == kAXStaticTextRole || role == kAXCellRole || role == kAXRowRole
         }, limit: 80, maxNodes: 1_500)
 
-        let ignored = ["친구", "추가", "검색", "카카오톡", "id", "아이디", "프로필", "확인"]
-        let texts = candidates.flatMap { collectTexts($0) }
+        let allTexts = candidates.flatMap { collectTexts($0) }
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        runner.log("friend result texts: \(allTexts.joined(separator: " | "))")
+
+        let ignored = ["친구", "추가", "검색", "카카오톡", "id", "아이디", "프로필", "확인"]
+        let texts = allTexts
             .filter { text in
                 guard text.count >= 2, text.count <= 40 else { return false }
                 let lower = text.lowercased()
@@ -299,6 +309,12 @@ struct KakaoContactAutomation {
 
     private func hasAnyText(in root: UIElement, matching patterns: [String]) -> Bool {
         findStaticOrButton(in: root, matching: patterns) != nil
+    }
+
+    private func hasNoResultNotice(in root: UIElement) -> Bool {
+        hasAnyText(in: root, matching: [
+            "검색을 허용한 친구만", "찾을 수 없", "검색 결과가 없", "등록된 사용자가 없", "존재하지 않"
+        ])
     }
 
     private func activate(_ element: UIElement, label: String) -> Bool {
