@@ -40,14 +40,10 @@ struct KakaoContactAutomation {
         let idRoot = waitForPopover(in: rootWindow) ?? popover
         let input = try requireBestTextInput(in: idRoot, label: "KakaoTalk ID input")
         try setText(kakaoID, on: input, label: "KakaoTalk ID input")
+        // triggerSearch already blocked until the result card (친구 추가 button)
+        // appeared, so a match is guaranteed here.
         try triggerSearch(in: idRoot, input: input)
         let resultRoot = waitForPopover(in: rootWindow) ?? idRoot
-        // No match: the popover keeps its "검색을 허용한 친구만 찾을 수 있습니다"
-        // notice (id not found, or the user disallows ID search). Without this
-        // check the header "친구 추가" reads as a result and we falsely report ok.
-        if hasNoResultNotice(in: resultRoot) {
-            throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendResultNotFound.rawValue)] No user found for this KakaoTalk ID (it may not exist or the user disallows ID search)")
-        }
         let friendName = resolveFriendDisplayName(in: resultRoot, fallback: kakaoID)
         try pressFriendAddConfirmation(in: resultRoot)
         return KakaoFriendAddResult(friendName: friendName, chatTitle: friendName, externalChatID: nil)
@@ -156,30 +152,40 @@ struct KakaoContactAutomation {
     }
 
     private func triggerSearch(in root: UIElement, input: UIElement) throws {
-        let patterns = ["검색", "search", "확인", "다음", "next"]
-        if let button = findButton(in: root, matching: patterns) {
-            _ = activate(button, label: "friend search button")
-        } else if runner.focusWithVerification(input, label: "KakaoTalk ID input", attempts: 1) {
-            runner.pressEnterKey()
-        }
-        let found = runner.waitUntil(label: "friend search result", timeout: 2.0, pollInterval: 0.1) {
-            hasAnyText(in: currentRoot(preferred: root), matching: ["친구", "추가", "add", "profile", "프로필"])
+        // KakaoTalk commits the ID search when Enter is pressed in the input
+        // field — there is no search button inside the popover, and findButton
+        // would otherwise pick the main window's 검색 control (which does nothing
+        // here and skips the Enter). Focus the field and press Enter.
+        _ = runner.focusWithVerification(input, label: "KakaoTalk ID input", attempts: 2)
+        runner.pressEnterKey()
+        // A search hit renders a 친구 추가 *button* in the ID-tab popover — absent
+        // before the search, and distinct from the popover's static-text header
+        // of the same name. (The no-result notice can linger in the AX tree even
+        // after a card appears, so keying off the button is more reliable.) It's
+        // a network lookup that can take a few seconds, so wait generously; a
+        // genuinely absent/private id never renders the button → we time out.
+        let found = runner.waitUntil(label: "friend search result", timeout: 8.0, pollInterval: 0.15) {
+            findButton(in: currentRoot(preferred: root), matching: ["친구 추가"]) != nil
         }
         if !found {
-            throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendResultNotFound.rawValue)] Friend search result did not appear")
+            throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendResultNotFound.rawValue)] No user found for this KakaoTalk ID (it may not exist or the user disallows ID search)")
         }
     }
 
     private func pressFriendAddConfirmation(in root: UIElement) throws {
         let patterns = ["친구 추가", "추가", "add friend", "add", "확인", "confirm"]
-        guard let button = findButton(in: currentRoot(preferred: root), matching: patterns) else {
+        guard let button = findButton(in: root, matching: patterns) else {
             runner.log("friend add: no explicit add button found; assuming existing friend or auto-added result")
             return
         }
-        guard activate(button, label: "friend add confirmation") else {
+        // Like the other popover controls, the confirm button ignores AXPress/
+        // Enter — a real mouse click at its center is what commits the add.
+        if let frame = button.frame {
+            runner.mouseClick(at: CGPoint(x: frame.midX, y: frame.midY), label: "friend add confirmation")
+        } else if !activate(button, label: "friend add confirmation") {
             throw KakaoTalkError.actionFailed("[\(ContactAutomationFailureCode.friendAddUINotFound.rawValue)] Could not press friend add confirmation")
         }
-        Thread.sleep(forTimeInterval: 0.2)
+        Thread.sleep(forTimeInterval: 0.3)
     }
 
     private func requireBestTextInput(in root: UIElement, label: String) throws -> UIElement {
@@ -194,8 +200,12 @@ struct KakaoContactAutomation {
             throw KakaoTalkError.actionFailed("[\(ContactAutomationFailureCode.inputNotReflected.rawValue)] Could not focus \(label)")
         }
         _ = runner.setTextWithVerification("", on: input, label: "\(label) clear", attempts: 1)
-        let ready = runner.setTextWithVerification(text, on: input, label: label, attempts: 2) ||
-            runner.typeTextWithVerification(text, on: input, label: label, attempts: 2)
+        // KakaoTalk's ID search only reacts to real key events — setting AXValue
+        // fills the field but never triggers the search (the popover keeps its
+        // "검색을 허용한 친구만…" placeholder). Type the id; fall back to AXValue
+        // injection only if typing fails to reflect.
+        let ready = runner.typeTextWithVerification(text, on: input, label: label, attempts: 2) ||
+            runner.setTextWithVerification(text, on: input, label: label, attempts: 2)
         if !ready {
             throw KakaoTalkError.actionFailed("[\(ContactAutomationFailureCode.inputNotReflected.rawValue)] \(label) did not reflect input")
         }
@@ -309,12 +319,6 @@ struct KakaoContactAutomation {
 
     private func hasAnyText(in root: UIElement, matching patterns: [String]) -> Bool {
         findStaticOrButton(in: root, matching: patterns) != nil
-    }
-
-    private func hasNoResultNotice(in root: UIElement) -> Bool {
-        hasAnyText(in: root, matching: [
-            "검색을 허용한 친구만", "찾을 수 없", "검색 결과가 없", "등록된 사용자가 없", "존재하지 않"
-        ])
     }
 
     private func activate(_ element: UIElement, label: String) -> Bool {
