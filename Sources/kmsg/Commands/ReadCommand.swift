@@ -173,14 +173,30 @@ struct ReadCommand: ParsableCommand {
                 limit: limit
             )
         } catch TranscriptReadError.transcriptContextUnavailable {
+            // A missing transcript area is a real failure (wrong/blank window) —
+            // in JSON mode report it as an error so callers don't mistake it for
+            // an empty chat and skip past unread messages.
+            if json {
+                print("{\"error\": \"TRANSCRIPT_UNAVAILABLE: could not locate chat transcript area\", \"ok\": false}")
+                throw ExitCode.failure
+            }
             print("Could not locate chat transcript area.")
             print("Use 'kmsg inspect --window <n>' to inspect the opened chat window.")
             return
         } catch TranscriptReadError.noMessageRows {
+            // An empty chat is a normal state; machine callers need valid JSON.
+            if json {
+                print(emptyMessagesJSON(chat: requestedChat))
+                return
+            }
             print("No message rows found in the chat transcript area.")
             print("Use 'kmsg inspect --window <n>' to inspect transcript structure.")
             return
         } catch TranscriptReadError.noReadableMessages {
+            if json {
+                print(emptyMessagesJSON(chat: requestedChat))
+                return
+            }
             print("No message body text extracted from transcript container.")
             print("Use 'kmsg inspect --window <n>' to inspect message nodes.")
             return
@@ -204,6 +220,15 @@ struct ReadCommand: ParsableCommand {
             print("    body: \(message.body)")
             print("")
         }
+    }
+
+    private func emptyMessagesJSON(chat: String) -> String {
+        let payload: [String: Any] = ["chat": chat, "count": 0, "messages": [] as [Any]]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+            let text = String(data: data, encoding: .utf8) {
+            return text
+        }
+        return "{\"messages\": []}"
     }
 
     private func printMessagesAsJSON(_ snapshot: TranscriptSnapshot) throws {
