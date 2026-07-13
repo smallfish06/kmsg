@@ -93,6 +93,10 @@ public final class UIElement: @unchecked Sendable {
         attributeOptional(kAXRoleDescriptionAttribute)
     }
 
+    public var subrole: String? {
+        attributeOptional(kAXSubroleAttribute)
+    }
+
     public var title: String? {
         attributeOptional(kAXTitleAttribute)
     }

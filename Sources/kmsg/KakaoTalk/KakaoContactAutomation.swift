@@ -28,11 +28,13 @@ struct KakaoContactAutomation {
     func addFriend(kakaoID: String) throws -> KakaoFriendAddResult {
         let rootWindow = try requireUsableWindow()
         try navigateToFriends(in: rootWindow)
-        let addRoot = try openFriendAddUI(from: rootWindow)
-        // Friend-add happens entirely inside an AXPopover. Scope every step to
-        // it: the main window also holds a "내 기본프로필" search field, and
-        // without scoping the input lookup grabs that instead of the ID field.
-        let popover = waitForPopover(in: rootWindow) ?? addRoot
+        try openFriendAddUI(from: rootWindow)
+        // Friend-add happens entirely inside an AXPopover. Require it: the main
+        // window's "이름으로 검색" AXSearchField must never be the target, so if
+        // the popover didn't open we fail loudly instead of typing the ID there.
+        guard let popover = waitForPopover(in: rootWindow) else {
+            throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendAddUINotFound.rawValue)] Friend add popover did not open")
+        }
         try selectKakaoIDMode(in: popover)
         // Re-fetch after the mode switch swaps the popover's contents.
         let idRoot = waitForPopover(in: rootWindow) ?? popover
@@ -69,18 +71,19 @@ struct KakaoContactAutomation {
         throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendsTabNotFound.rawValue)] Friends tab button not found")
     }
 
-    private func openFriendAddUI(from rootWindow: UIElement) throws -> UIElement {
-        let patterns = [
-            "친구 추가", "친구추가", "add friend", "add friends",
-            "친구", "추가", "add", "plus", "+"
-        ]
+    private func openFriendAddUI(from rootWindow: UIElement) throws {
+        // The person+ toolbar button has no title/identifier — only
+        // AXDescription "친구 추가" (collectTexts includes axDescription, so this
+        // exact-matches at the top score). Keep the patterns tight: the loose
+        // "친구"/"추가"/"+" fallbacks also matched the sidebar Friends tab
+        // (AXHelp "친구 (⌘1)") and could open the wrong thing.
+        let patterns = ["친구 추가", "친구추가", "add friend", "add friends"]
         guard let addButton = findButton(in: currentRoot(preferred: rootWindow), matching: patterns) else {
             throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendAddUINotFound.rawValue)] Friend add button not found")
         }
         guard activate(addButton, label: "friend add button") else {
             throw KakaoTalkError.actionFailed("[\(ContactAutomationFailureCode.friendAddUINotFound.rawValue)] Could not open friend add UI")
         }
-        return waitForNewRoot(after: rootWindow, label: "friend add UI") ?? currentRoot(preferred: rootWindow)
     }
 
     private func selectKakaoIDMode(in root: UIElement) throws {
@@ -179,7 +182,14 @@ struct KakaoContactAutomation {
 
     private func isTextInput(_ element: UIElement) -> Bool {
         let role = element.role ?? ""
-        return element.isEnabled && (role == kAXTextFieldRole || role == kAXTextAreaRole || role == "AXComboBox")
+        guard element.isEnabled, role == kAXTextFieldRole || role == kAXTextAreaRole || role == "AXComboBox" else {
+            return false
+        }
+        // The friends-list "이름으로 검색" box is an AXSearchField in the main
+        // window — never the friend-add ID field. Excluding it prevents typing
+        // the ID into the wrong box if the add popover isn't found.
+        if element.subrole == "AXSearchField" { return false }
+        return true
     }
 
     private func scoreTextInput(_ element: UIElement) -> Int {
