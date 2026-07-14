@@ -51,6 +51,9 @@ struct ReadCommand: ParsableCommand {
     @Flag(name: [.short, .long], help: "Keep auto-opened chat window after read")
     var keepWindow: Bool = false
 
+    @Flag(name: .long, help: "Close the chat window after reading even if it was already open")
+    var closeWindow: Bool = false
+
     @Flag(
         name: .long,
         help: "Do not activate, search, open, resize, or close KakaoTalk windows; only read already exposed matching chat windows"
@@ -151,14 +154,18 @@ struct ReadCommand: ParsableCommand {
         }
 
         defer {
-            if resolution.openedTransiently && !keepWindow {
+            // --close-window also closes a PRE-EXISTING chat window after the
+            // read. A chat window left open makes that chat's list row
+            // unreadable ("(Unknown Chat)"), which breaks list-scan detection;
+            // callers use this to self-heal that state.
+            if (resolution.openedTransiently || closeWindow) && !keepWindow {
                 let resolvedTitle = window.title ?? ""
                 if chatID == nil && !resolvedTitle.isEmpty && !resolvedTitle.localizedCaseInsensitiveContains(requestedChat) {
                     runner.log("read: skipped auto-close because resolved title '\(resolvedTitle)' did not match query")
                 } else if chatWindowResolver.closeWindow(window) {
-                    runner.log("read: auto-opened chat window closed")
+                    runner.log(resolution.openedTransiently ? "read: auto-opened chat window closed" : "read: pre-existing chat window closed by --close-window")
                 } else {
-                    runner.log("read: failed to close auto-opened chat window")
+                    runner.log("read: failed to close chat window")
                 }
             } else if resolution.openedTransiently && keepWindow {
                 runner.log("read: auto-opened chat window kept by --keep-window")
