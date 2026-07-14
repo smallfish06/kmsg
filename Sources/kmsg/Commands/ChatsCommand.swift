@@ -72,9 +72,23 @@ struct ChatsCommand: ParsableCommand {
 
         runner.log("chats: usable window ready")
         let scanner = ChatListScanner()
-        let snapshots = scanner.scan(in: mainWindow, limit: limit, trace: { message in
+        var snapshots = scanner.scan(in: mainWindow, limit: limit, trace: { message in
             runner.log(message)
         })
+
+        // An empty scan usually means the main window is on the friends tab
+        // (e.g. left there by friend-add automation) — the chat list silently
+        // reads as zero rows. Switch to the chats tab (⌘2) and rescan once.
+        if snapshots.isEmpty {
+            runner.log("chats: empty scan — switching to the chats tab (⌘2) and rescanning")
+            kakao.activate()
+            runner.pressCommandTwo()
+            Thread.sleep(forTimeInterval: 0.4)
+            let retryWindow = kakao.chatListWindow ?? mainWindow
+            snapshots = scanner.scan(in: retryWindow, limit: limit, trace: { message in
+                runner.log(message)
+            })
+        }
 
         if snapshots.isEmpty {
             if json {
