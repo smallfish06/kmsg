@@ -76,11 +76,17 @@ struct ChatsCommand: ParsableCommand {
             runner.log(message)
         })
 
-        // An empty scan usually means the main window is on the friends tab
-        // (e.g. left there by friend-add automation) — the chat list silently
-        // reads as zero rows. Switch to the chats tab (⌘2) and rescan once.
-        if snapshots.isEmpty {
-            runner.log("chats: empty scan — switching to the chats tab (⌘2) and rescanning")
+        // The main window being on the friends tab shows up two ways: an
+        // empty scan, OR — worse — a non-empty scan of friend rows whose
+        // "previews" are status messages that never change with new messages,
+        // silently freezing inbound detection downstream. Both cases: switch
+        // to the chats tab (⌘2) and rescan once.
+        if snapshots.isEmpty || scanner.looksLikeFriendsList(snapshots, trace: { runner.log($0) }) {
+            runner.log(
+                snapshots.isEmpty
+                    ? "chats: empty scan — switching to the chats tab (⌘2) and rescanning"
+                    : "chats: scan looks like the FRIENDS list (no row timestamps) — switching to the chats tab (⌘2) and rescanning"
+            )
             kakao.activate()
             runner.pressCommandTwo()
             Thread.sleep(forTimeInterval: 0.4)
@@ -88,6 +94,13 @@ struct ChatsCommand: ParsableCommand {
             snapshots = scanner.scan(in: retryWindow, limit: limit, trace: { message in
                 runner.log(message)
             })
+            // Refuse to report friends as chats: bogus rows with frozen
+            // previews are strictly worse than an empty result (callers treat
+            // empty as scan-missing and fall back to direct by-name reads).
+            if scanner.looksLikeFriendsList(snapshots, trace: { runner.log($0) }) {
+                runner.log("chats: rescan still looks like the friends list — reporting no chats instead of friends rows")
+                snapshots = []
+            }
         }
 
         if snapshots.isEmpty {

@@ -41,6 +41,15 @@ enum ChatTextNormalizer {
         return false
     }
 
+    /// Row-timestamp detector for friends-tab detection: accepts the bare
+    /// "3:12" form of isTimeLikeValue plus the chat list's rendered
+    /// "오전 3:12" / "오후 11:47" form.
+    static func isClockLikeValue(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isTimeLikeValue(trimmed) { return true }
+        return trimmed.range(of: "^(오전|오후) ?[0-9]{1,2}:[0-9]{2}$", options: .regularExpression) != nil
+    }
+
     static func isUnreadCountLike(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
@@ -96,6 +105,28 @@ struct ChatListScanner {
 
         trace?("chats: resolved rows=\(snapshots.count)")
         return snapshots
+    }
+
+    /// The friends tab masquerades as a chat list: same row container, same
+    /// titles (friend names), and a non-empty scan — but the "preview" is the
+    /// friend's STATUS MESSAGE, which never changes with new messages
+    /// (observed live: a bound chat's preview frozen for 7+ hours while
+    /// messages piled up unread). Chat rows always carry a per-row timestamp
+    /// ("오후 3:12", "어제"); friends rows never do. A non-empty list with no
+    /// timestamp anywhere is the friends tab.
+    func looksLikeFriendsList(_ snapshots: [ChatListSnapshotItem], trace: ((String) -> Void)? = nil) -> Bool {
+        guard !snapshots.isEmpty else { return false }
+        for snapshot in snapshots.prefix(10) {
+            let texts = snapshot.element.findAll(role: kAXStaticTextRole, limit: 16, maxNodes: 100)
+            for node in texts {
+                let candidates = [node.stringValue, node.title].compactMap { $0 }
+                if candidates.contains(where: { ChatTextNormalizer.isClockLikeValue($0) }) {
+                    return false
+                }
+            }
+        }
+        trace?("chats: no row timestamps in \(min(snapshots.count, 10)) scanned rows — friends list suspected")
+        return true
     }
 
     func warmup(in window: UIElement, trace: ((String) -> Void)? = nil) -> [AXPathSlot] {
