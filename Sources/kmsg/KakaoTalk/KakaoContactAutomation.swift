@@ -29,7 +29,14 @@ struct KakaoContactAutomation {
         // Whatever happens, close the popover (and any profile window the add
         // opens) before returning: leftover windows block the next automation —
         // kmsg send misreads them as a login screen ("Enter KakaoTalk credentials").
-        defer { dismissLeftoverUI() }
+        // Then restore the CHATS tab: friend-add is the only automation that
+        // navigates to the friends tab, and leaving the main window there makes
+        // the next chat-list scan read friend rows (status messages) as chats —
+        // frozen previews downstream. The tab is friend-add's to put back.
+        defer {
+            dismissLeftoverUI()
+            restoreChatsTab()
+        }
         // Also clear anything a previous crashed run left open.
         dismissLeftoverUI()
 
@@ -69,6 +76,11 @@ struct KakaoContactAutomation {
         Thread.sleep(forTimeInterval: 0.15)
         runner.pressEscapeKey()
         Thread.sleep(forTimeInterval: 0.15)
+    }
+
+    private func restoreChatsTab() {
+        runner.pressCommandTwo()
+        Thread.sleep(forTimeInterval: 0.2)
     }
 
     private func requireUsableWindow() throws -> UIElement {
