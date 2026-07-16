@@ -16,6 +16,9 @@ private enum ContactAutomationFailureCode: String {
     case friendResultNotFound = "FRIEND_RESULT_NOT_FOUND"
     case chatStartUINotFound = "CHAT_START_UI_NOT_FOUND"
     case chatWindowNotReady = "CHAT_WINDOW_NOT_READY"
+    case messageInputNotFound = "MESSAGE_INPUT_NOT_FOUND"
+    case messageSendNotConfirmed = "MESSAGE_SEND_NOT_CONFIRMED"
+    case chatIdentityNotConfirmed = "CHAT_IDENTITY_NOT_CONFIRMED"
 }
 
 struct KakaoContactAutomation {
@@ -27,10 +30,12 @@ struct KakaoContactAutomation {
         self.runner = runner
     }
 
-    func addFriend(kakaoID: String) throws -> KakaoFriendAddResult {
+    func addFriend(kakaoID: String, message: String? = nil) throws -> KakaoFriendAddResult {
         // A first conversation does not exist in the Chats tab yet. Friend-add
         // must therefore enter the 1:1 chat from the Friends result/profile and
-        // leave that input-ready window exposed for the following `kmsg send`.
+        // send its optional first message through that exact window in this
+        // process. A second `kmsg send` process could resolve a same-title chat
+        // window or fall back to Chats search, so it is deliberately avoided.
         // On failure, clear the partial UI. On success, preserve and re-raise the
         // direct chat after putting the main list back on Chats behind it.
         var openedChatWindow: UIElement?
@@ -70,12 +75,32 @@ struct KakaoContactAutomation {
         )
         openedChatWindow = chatWindow
 
-        // The result card can show a decorated name (for example
-        // "주철민(Ju,Chulmin)") while the actual chat window title is shorter.
-        // Return the verified chat's real non-generic title so the following
-        // `kmsg send` resolves that already-open window without Chats search.
-        let chatTitle = usableChatTitle(chatWindow.title) ?? friendName
-        return KakaoFriendAddResult(friendName: friendName, chatTitle: chatTitle, externalChatID: nil)
+        // The chat title is read from the exact window opened by the Friends
+        // flow. It is metadata only; it must never be used as an identity
+        // fallback when duplicate display names exist.
+        guard let chatTitle = usableChatTitle(chatWindow.title) else {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.chatIdentityNotConfirmed.rawValue)] Friends-opened chat had no exact usable title"
+            )
+        }
+        let externalChatID: String?
+
+        if let message {
+            try sendFirstMessage(message, in: chatWindow)
+            externalChatID = try confirmChatIdentity(
+                chatTitle: chatTitle,
+                opener: message,
+                mainListWindow: rootWindow
+            )
+        } else {
+            externalChatID = nil
+        }
+
+        return KakaoFriendAddResult(
+            friendName: friendName,
+            chatTitle: chatTitle,
+            externalChatID: externalChatID
+        )
     }
 
     // ESC closes the friend-add popover and the profile window KakaoTalk opens
@@ -398,6 +423,373 @@ struct KakaoContactAutomation {
         return chatWindow
     }
 
+    private func sendFirstMessage(_ message: String, in chatWindow: UIElement) throws {
+        kakao.activate()
+        _ = tryRaiseWindow(chatWindow, label: "friend first-message chat")
+
+        let exactWindowFocused = runner.waitUntil(
+            label: "friend first-message exact chat focus",
+            timeout: 0.8,
+            pollInterval: 0.05
+        ) {
+            guard let focusedWindow = kakao.focusedWindow else { return false }
+            return sameElement(focusedWindow, chatWindow)
+        }
+        guard exactWindowFocused else {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.messageInputNotFound.rawValue)] Friends-opened chat window did not retain focus"
+            )
+        }
+
+        guard let resolvedInput = resolveExactChatMessageInput(in: chatWindow),
+              let input = focusExactChatMessageInput(resolvedInput, in: chatWindow)
+        else {
+            throw KakaoTalkError.elementNotFound(
+                "[\(ContactAutomationFailureCode.messageInputNotFound.rawValue)] Message input was not found inside the Friends-opened chat window"
+            )
+        }
+
+        guard let currentValue = input.stringValue else {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.messageInputNotFound.rawValue)] Friends-opened chat input did not expose a verifiable value"
+            )
+        }
+        let placeholder: String? = input.attributeOptional(kAXPlaceholderValueAttribute)
+        let existingDraft = currentValue == placeholder ? "" : currentValue
+        if !existingDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.messageInputNotFound.rawValue)] Refusing to replace a non-empty draft in the Friends-opened chat"
+            )
+        }
+
+        // Real key events keep Kakao's rich composer state in sync. AXValue is
+        // only a fallback, and both paths must reflect on an element that is a
+        // descendant of the exact window opened above.
+        var inputReady = runner.typeTextWithVerification(
+            message,
+            on: input,
+            label: "friend first-message input",
+            attempts: 1
+        ) && input.stringValue == message
+        if !inputReady {
+            inputReady = runner.setTextWithVerification(
+                message,
+                on: input,
+                label: "friend first-message input",
+                attempts: 1
+            ) && input.stringValue == message
+        }
+        guard inputReady,
+              exactChatWindowIsFocused(chatWindow),
+              exactChatMessageInputHasFocus(input, in: chatWindow),
+              isSameOrDescendant(input, of: chatWindow)
+        else {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.inputNotReflected.rawValue)] First message did not reflect in the Friends-opened chat"
+            )
+        }
+
+        // Send once. Do not retry Enter after an ambiguous result: that could
+        // duplicate a message. Success requires the exact chat to remain focused
+        // and its verified composer value to clear.
+        runner.pressEnterKey()
+        let sent = runner.waitUntil(
+            label: "friend first-message send reflected",
+            timeout: 0.8,
+            pollInterval: 0.05,
+            evaluateAfterTimeout: false
+        ) {
+            guard exactChatWindowIsFocused(chatWindow) else { return false }
+            if let value = input.stringValue {
+                return value.isEmpty
+            }
+            if let replacement = focusedExactChatMessageInput(in: chatWindow),
+               let value = replacement.stringValue
+            {
+                return value.isEmpty
+            }
+            return false
+        }
+        guard sent else {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.messageSendNotConfirmed.rawValue)] First-message send was not confirmed in the Friends-opened chat"
+            )
+        }
+        runner.log("friend add: first message sent through exact Friends-opened chat window")
+    }
+
+    private func confirmChatIdentity(
+        chatTitle: String,
+        opener: String,
+        mainListWindow: UIElement
+    ) throws -> String {
+        let normalizedTitle = ChatTextNormalizer.normalize(chatTitle)
+        let normalizedOpener = ChatTextNormalizer.normalize(opener)
+        guard !normalizedTitle.isEmpty, !normalizedOpener.isEmpty else {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.chatIdentityNotConfirmed.rawValue)] Chat title or opener could not be normalized"
+            )
+        }
+
+        // Keep the exact conversation window alive in openedChatWindow while
+        // temporarily bringing the main list to Chats. The outer defer raises
+        // that same AX handle again on both success and failure.
+        kakao.activate()
+        runner.pressCommandTwo()
+        Thread.sleep(forTimeInterval: 0.25)
+        do {
+            try AXPathCacheStore.shared.clear(slots: [.chatListContainer, .chatRowTitle, .chatRowPreview])
+        } catch {
+            runner.log("friend identity: chat-list cache clear failed (\(error))")
+        }
+
+        let scanner = ChatListScanner()
+        for attempt in 1...4 {
+            let listWindow = kakao.chatListWindow ?? mainListWindow
+            let snapshots = scanner.scan(in: listWindow, limit: 40, trace: { runner.log($0) })
+
+            if scanner.looksLikeFriendsList(snapshots, trace: { runner.log($0) }) {
+                runner.log("friend identity attempt \(attempt): main list still shows Friends")
+                Thread.sleep(forTimeInterval: 0.2)
+                continue
+            }
+
+            let matches = snapshots.enumerated().filter { _, snapshot in
+                guard let lastMessage = snapshot.discovery.lastMessage else { return false }
+                return ChatTextNormalizer.normalize(snapshot.discovery.title) == normalizedTitle &&
+                    ChatTextNormalizer.normalize(lastMessage) == normalizedOpener
+            }
+
+            if matches.count > 1 {
+                throw KakaoTalkError.actionFailed(
+                    "[\(ContactAutomationFailureCode.chatIdentityNotConfirmed.rawValue)] Multiple chat rows matched the exact title and opener"
+                )
+            }
+
+            if let match = matches.first {
+                let registry = ChatIdentityRegistryStore.shared
+                let assignedIDs = registry.assignChatIDs(for: snapshots.map(\.discovery))
+                guard assignedIDs.indices.contains(match.offset) else {
+                    throw KakaoTalkError.actionFailed(
+                        "[\(ContactAutomationFailureCode.chatIdentityNotConfirmed.rawValue)] Matched chat row had no registry position"
+                    )
+                }
+                let chatID = assignedIDs[match.offset]
+                guard !chatID.isEmpty else {
+                    throw KakaoTalkError.actionFailed(
+                        "[\(ContactAutomationFailureCode.chatIdentityNotConfirmed.rawValue)] Matched chat row did not receive a registry id"
+                    )
+                }
+                runner.log(
+                    "friend identity: confirmed unique row title='\(match.element.discovery.title)' chat_id='\(chatID)'"
+                )
+                return chatID
+            }
+
+            runner.log("friend identity attempt \(attempt): exact title/opener row not visible")
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+
+        throw KakaoTalkError.actionFailed(
+            "[\(ContactAutomationFailureCode.chatIdentityNotConfirmed.rawValue)] No unique chat row matched the exact title and opener"
+        )
+    }
+
+    private func resolveExactChatMessageInput(in chatWindow: UIElement) -> UIElement? {
+        if let focused = focusedExactChatMessageInput(in: chatWindow) {
+            runner.log("friend message input: resolved from exact-window focus")
+            return focused
+        }
+
+        let candidates = chatWindow.findAll(where: { element in
+            let role = element.role ?? ""
+            let editable: Bool = element.attributeOptional(kAXEditableAttribute) ?? false
+            return role == kAXTextAreaRole || role == kAXTextFieldRole || editable
+        }, limit: 32, maxNodes: 800)
+        if let input = bestExactChatMessageInput(candidates, in: chatWindow) {
+            runner.log("friend message input: resolved from bounded exact-window scan")
+            return input
+        }
+
+        // Some Kakao builds omit the rich composer from AXChildren. Hit-testing
+        // a few central points in the bottom portion of this exact window can
+        // still expose its leaf element without traversing the transcript.
+        guard let frame = chatWindow.frame, frame.width > 0, frame.height > 0 else { return nil }
+        let probePoints = [
+            CGPoint(x: frame.midX, y: frame.minY + frame.height * 0.82),
+            CGPoint(x: frame.midX, y: frame.minY + frame.height * 0.88),
+            CGPoint(x: frame.midX, y: frame.minY + frame.height * 0.76),
+        ]
+
+        for point in probePoints {
+            guard exactChatWindowIsFocused(chatWindow),
+                  let hit = try? kakao.applicationElement.element(at: point),
+                  isSameOrDescendant(hit, of: chatWindow)
+            else { continue }
+
+            if let input = bestExactChatMessageInput(inputCandidates(around: hit), in: chatWindow) {
+                runner.log("friend message input: resolved by exact-window hit test")
+                return input
+            }
+
+            guard isSafeComposerFocusProbe(hit, at: point, in: chatWindow) else { continue }
+            runner.mouseClick(at: point, label: "friend message composer probe")
+            let focused = runner.waitUntil(
+                label: "friend message composer probe focus",
+                timeout: 0.25,
+                pollInterval: 0.04
+            ) {
+                focusedExactChatMessageInput(in: chatWindow) != nil
+            }
+            if focused, let input = focusedExactChatMessageInput(in: chatWindow) {
+                runner.log("friend message input: resolved from exact-window probe focus")
+                return input
+            }
+        }
+
+        runner.log("friend message input: no candidate inside exact Friends-opened chat window")
+        return nil
+    }
+
+    private func focusExactChatMessageInput(_ input: UIElement, in chatWindow: UIElement) -> UIElement? {
+        guard isExactChatMessageInput(input, in: chatWindow), exactChatWindowIsFocused(chatWindow) else {
+            return nil
+        }
+
+        _ = runner.focusWithVerification(input, label: "friend first-message input", attempts: 1)
+        if let focused = focusedExactChatMessageInput(in: chatWindow) {
+            return focused
+        }
+
+        if let frame = input.frame {
+            runner.mouseClick(at: CGPoint(x: frame.midX, y: frame.midY), label: "friend first-message input")
+            _ = runner.waitUntil(label: "friend first-message input focused", timeout: 0.3, pollInterval: 0.04) {
+                focusedExactChatMessageInput(in: chatWindow) != nil
+            }
+        }
+        return focusedExactChatMessageInput(in: chatWindow)
+    }
+
+    private func focusedExactChatMessageInput(in chatWindow: UIElement) -> UIElement? {
+        guard exactChatWindowIsFocused(chatWindow),
+              let focused = kakao.applicationElement.focusedUIElement,
+              isSameOrDescendant(focused, of: chatWindow)
+        else { return nil }
+        return bestExactChatMessageInput(inputCandidates(around: focused), in: chatWindow)
+    }
+
+    private func exactChatMessageInputHasFocus(_ input: UIElement, in chatWindow: UIElement) -> Bool {
+        guard exactChatWindowIsFocused(chatWindow),
+              let focused = kakao.applicationElement.focusedUIElement,
+              isSameOrDescendant(focused, of: chatWindow)
+        else { return false }
+        return sameElement(focused, input) ||
+            isSameOrDescendant(focused, of: input) ||
+            isSameOrDescendant(input, of: focused)
+    }
+
+    private func inputCandidates(around element: UIElement) -> [UIElement] {
+        var candidates = [element]
+        var cursor = element.parent
+        var hops = 0
+        while let current = cursor, hops < 8 {
+            candidates.append(current)
+            cursor = current.parent
+            hops += 1
+        }
+        candidates.append(contentsOf: element.findAll(where: { candidate in
+            let role = candidate.role ?? ""
+            let editable: Bool = candidate.attributeOptional(kAXEditableAttribute) ?? false
+            return role == kAXTextAreaRole || role == kAXTextFieldRole || editable
+        }, limit: 12, maxNodes: 64))
+        return deduplicate(candidates)
+    }
+
+    private func bestExactChatMessageInput(_ candidates: [UIElement], in chatWindow: UIElement) -> UIElement? {
+        candidates
+            .filter { isExactChatMessageInput($0, in: chatWindow) }
+            .max { lhs, rhs in
+                exactChatMessageInputScore(lhs, in: chatWindow) < exactChatMessageInputScore(rhs, in: chatWindow)
+            }
+    }
+
+    private func isExactChatMessageInput(_ element: UIElement, in chatWindow: UIElement) -> Bool {
+        guard isSameOrDescendant(element, of: chatWindow) else { return false }
+        let enabled: Bool? = element.attributeOptional(kAXEnabledAttribute)
+        guard enabled != false else { return false }
+
+        let role = element.role ?? ""
+        let editable: Bool = element.attributeOptional(kAXEditableAttribute) ?? false
+        guard role == kAXTextAreaRole || role == kAXTextFieldRole || editable else { return false }
+        guard role != kAXStaticTextRole, role != kAXImageRole, element.subrole != "AXSearchField" else {
+            return false
+        }
+        let text = normalize(elementText(element))
+        guard !text.contains("검색"), !text.contains("search") else { return false }
+
+        guard let windowFrame = chatWindow.frame,
+              let elementFrame = element.frame,
+              windowFrame.width > 0,
+              windowFrame.height > 0,
+              windowFrame.insetBy(dx: -4, dy: -4).intersects(elementFrame)
+        else { return false }
+        let relativeY = (elementFrame.midY - windowFrame.minY) / windowFrame.height
+        return relativeY > 0.52 && elementFrame.width > windowFrame.width * 0.18
+    }
+
+    private func exactChatMessageInputScore(_ element: UIElement, in chatWindow: UIElement) -> Double {
+        let role = element.role ?? ""
+        let editable: Bool = element.attributeOptional(kAXEditableAttribute) ?? false
+        var score = role == kAXTextAreaRole ? 10_000.0 : (role == kAXTextFieldRole ? 8_000.0 : 0.0)
+        if editable { score += 4_000.0 }
+        if element.isFocused { score += 2_000.0 }
+        if let windowFrame = chatWindow.frame, let elementFrame = element.frame, windowFrame.width > 0 {
+            score += Double(elementFrame.width / windowFrame.width) * 1_000.0
+            score += Double((elementFrame.midY - windowFrame.minY) / max(windowFrame.height, 1.0)) * 500.0
+        }
+        return score
+    }
+
+    private func isSafeComposerFocusProbe(_ hit: UIElement, at point: CGPoint, in chatWindow: UIElement) -> Bool {
+        guard isSameOrDescendant(hit, of: chatWindow), let windowFrame = chatWindow.frame else { return false }
+        let relativeX = (point.x - windowFrame.minX) / max(windowFrame.width, 1.0)
+        let relativeY = (point.y - windowFrame.minY) / max(windowFrame.height, 1.0)
+        guard relativeX > 0.3, relativeX < 0.7, relativeY > 0.7 else { return false }
+
+        let role = hit.role ?? ""
+        let blockedRoles: Set<String> = [
+            kAXButtonRole, kAXImageRole, kAXCheckBoxRole, "AXLink", "AXMenuItem", "AXPopUpButton",
+        ]
+        if blockedRoles.contains(role) { return false }
+        if role == kAXStaticTextRole {
+            let text = normalize(elementText(hit))
+            return text.contains("메시지") || text.contains("message") || text.contains("입력")
+        }
+        return true
+    }
+
+    private func exactChatWindowIsFocused(_ chatWindow: UIElement) -> Bool {
+        guard let focusedWindow = kakao.focusedWindow,
+              sameElement(focusedWindow, chatWindow),
+              kakao.windows.contains(where: { sameElement($0, chatWindow) })
+        else { return false }
+        return true
+    }
+
+    private func isSameOrDescendant(_ element: UIElement, of ancestor: UIElement) -> Bool {
+        var cursor: UIElement? = element
+        var visited: [UIElement] = []
+        var hops = 0
+        while let current = cursor, hops < 16 {
+            if sameElement(current, ancestor) { return true }
+            if visited.contains(where: { sameElement($0, current) }) { return false }
+            visited.append(current)
+            cursor = current.parent
+            hops += 1
+        }
+        return false
+    }
+
     private func findFreshChatStartAction(
         preferredRoot: UIElement,
         mainListWindow: UIElement,
@@ -466,19 +858,34 @@ struct KakaoContactAutomation {
                 !(focusedWindowBeforeStart.map { sameElement($0, window) } ?? false)
             let normalizedTitle = normalize(window.title ?? "")
             let titleMatches = !normalizedFriendName.isEmpty &&
-                (normalizedTitle == normalizedFriendName || normalizedTitle.contains(normalizedFriendName))
-            guard isNewWindow || titleMatches || focusChanged else { return nil }
+                (normalizedTitle == normalizedFriendName || normalizedTitle.contains(normalizedFriendName) ||
+                    normalizedFriendName.contains(normalizedTitle))
+            let strongTitleMatch = !normalizedFriendName.isEmpty && normalizedTitle == normalizedFriendName
+            let openedByThisClick = (isNewWindow || focusChanged) && titleMatches
+            guard openedByThisClick else { return nil }
 
             // Names are not a reliable discriminator: Kakao decorates the
-            // Friend result but may shorten the chat title. Verify a bounded,
-            // lower-window composer scan instead. A full transcript traversal
-            // is far too expensive on Kakao's AX tree and can stall for minutes.
-            let hasComposer = hasChatComposer(in: window)
+            // Friend result but may shorten the chat title. Prefer a bounded
+            // composer scan, but Kakao builds that expose no editable AX node
+            // can still be recognized by the click-caused window/focus change.
+            // The pre-click snapshot and vanished 1:1 action keep the profile
+            // window from satisfying this structural fallback.
+            let stillShowsChatStartAction = hasOneToOneChatAction(in: window)
+            let structuralCandidate = isNewWindow && focusChanged && strongTitleMatch && !stillShowsChatStartAction
+            let structuralTransition = structuralCandidate && isStableStructuralChatWindow(
+                window,
+                normalizedTitle: normalizedTitle
+            )
+            let hasComposer = structuralTransition ? false : hasChatComposer(
+                in: window,
+                stillShowsChatStartAction: stillShowsChatStartAction
+            )
             runner.log(
                 "friend chat candidate title='\(window.title ?? "")' new=\(isNewWindow) " +
-                    "focusChanged=\(focusChanged) titleMatches=\(titleMatches) composer=\(hasComposer)"
+                    "focusChanged=\(focusChanged) titleMatches=\(titleMatches) " +
+                    "startAction=\(stillShowsChatStartAction) composer=\(hasComposer) structural=\(structuralTransition)"
             )
-            guard hasComposer else { return nil }
+            guard hasComposer || structuralTransition else { return nil }
 
             var score = 0
             if titleMatches { score += 2_000 }
@@ -490,7 +897,18 @@ struct KakaoContactAutomation {
         .window
     }
 
-    private func hasChatComposer(in root: UIElement) -> Bool {
+    private func isStableStructuralChatWindow(_ window: UIElement, normalizedTitle: String) -> Bool {
+        Thread.sleep(forTimeInterval: 0.12)
+        guard let focused = kakao.focusedWindow,
+              sameElement(focused, window),
+              kakao.windows.contains(where: { sameElement($0, window) }),
+              normalize(window.title ?? "") == normalizedTitle,
+              !hasOneToOneChatAction(in: window)
+        else { return false }
+        return true
+    }
+
+    private func hasChatComposer(in root: UIElement, stillShowsChatStartAction: Bool) -> Bool {
         let candidates = root.findAll(where: { element in
             guard element.isEnabled else { return false }
             let role = element.role ?? ""
@@ -498,7 +916,6 @@ struct KakaoContactAutomation {
             return role == kAXTextAreaRole || role == kAXTextFieldRole || editable
         }, limit: 32, maxNodes: 800)
 
-        let stillShowsChatStartAction = hasOneToOneChatAction(in: root)
         let matched = candidates.first { element in
             let role = element.role ?? ""
             guard role != kAXStaticTextRole, role != kAXImageRole, element.subrole != "AXSearchField" else {

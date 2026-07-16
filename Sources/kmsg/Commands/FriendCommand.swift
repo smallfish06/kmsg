@@ -38,6 +38,9 @@ struct FriendAddCommand: ParsableCommand {
     @Option(name: .long, help: "KakaoTalk ID to add")
     var kakaoID: String
 
+    @Option(name: .long, help: "Send the first message in the 1:1 chat opened from Friends")
+    var message: String?
+
     @Flag(name: .long, help: "Output in JSON format")
     var json: Bool = false
 
@@ -50,6 +53,9 @@ struct FriendAddCommand: ParsableCommand {
     func validate() throws {
         if kakaoID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ValidationError("--kakao-id is required.")
+        }
+        if let message, message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ValidationError("--message must not be empty when provided.")
         }
     }
 
@@ -74,7 +80,10 @@ struct FriendAddCommand: ParsableCommand {
         let kakao = try AuthBootstrap.requireAuthenticated(traceAX: traceAX)
         do {
             let automation = KakaoContactAutomation(kakao: kakao, runner: runner)
-            let result = try automation.addFriend(kakaoID: normalizedID)
+            let result = try automation.addFriend(
+                kakaoID: normalizedID,
+                message: message?.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
             try printResult(
                 friendName: result.friendName,
                 chatTitle: result.chatTitle,
