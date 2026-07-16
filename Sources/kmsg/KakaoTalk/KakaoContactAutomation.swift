@@ -303,7 +303,6 @@ struct KakaoContactAutomation {
         // Snapshot before confirming a new friend. A new profile/chat window is
         // then distinguishable from unrelated chat windows already on screen.
         let windowsBeforeStart = kakao.windows
-        let focusedWindowBeforeStart = kakao.focusedWindow
         let chatPatterns = [
             "1:1 채팅", "1:1대화", "채팅하기", "대화하기", "메시지 보내기",
         ]
@@ -339,6 +338,12 @@ struct KakaoContactAutomation {
             )
         }
 
+        // A newly-added friend's profile is itself a new/focused window. Take
+        // the readiness baseline only after resolving that profile's 1:1
+        // action so the profile cannot masquerade as the chat it should open.
+        let windowsBeforeChatStart = kakao.windows
+        let focusedWindowBeforeChatStart = kakao.focusedWindow
+
         var chatWindow: UIElement?
         for attempt in 0..<3 where chatWindow == nil {
             var actionAvailable = true
@@ -372,8 +377,8 @@ struct KakaoContactAutomation {
                 chatWindow = findInputReadyChatWindow(
                     friendName: friendName,
                     excluding: mainListWindow,
-                    windowsBeforeStart: windowsBeforeStart,
-                    focusedWindowBeforeStart: focusedWindowBeforeStart
+                    windowsBeforeStart: windowsBeforeChatStart,
+                    focusedWindowBeforeStart: focusedWindowBeforeChatStart
                 )
                 return chatWindow != nil
             }
@@ -491,9 +496,10 @@ struct KakaoContactAutomation {
             let role = element.role ?? ""
             let editable: Bool = element.attributeOptional(kAXEditableAttribute) ?? false
             return role == kAXTextAreaRole || role == kAXTextFieldRole || editable
-        }, limit: 24, maxNodes: 360)
+        }, limit: 32, maxNodes: 800)
 
-        return candidates.contains { element in
+        let stillShowsChatStartAction = hasOneToOneChatAction(in: root)
+        let matched = candidates.first { element in
             let role = element.role ?? ""
             guard role != kAXStaticTextRole, role != kAXImageRole, element.subrole != "AXSearchField" else {
                 return false
@@ -503,15 +509,41 @@ struct KakaoContactAutomation {
             guard !text.contains("검색"), !text.contains("search") else { return false }
             let isMessageLabeled = (text.contains("메시지") || text.contains("message") || text.contains("입력")) &&
                 !text.contains("상태") && !text.contains("profile") && !text.contains("프로필")
-            guard role == kAXTextAreaRole || isMessageLabeled else { return false }
+            // Kakao's rich-text composer is not stable across builds: some
+            // versions expose a custom editable AXGroup instead of AXTextArea.
+            // Its bottom/wide geometry still distinguishes it from profile and
+            // search controls, so retain custom editable candidates here.
+            let editable: Bool = element.attributeOptional(kAXEditableAttribute) ?? false
+            let customComposer = (role == kAXTextFieldRole || editable) && !stillShowsChatStartAction
+            guard role == kAXTextAreaRole || isMessageLabeled || customComposer else { return false }
 
             guard let rootFrame = root.frame, let elementFrame = element.frame,
                   rootFrame.height > 0, rootFrame.width > 0
-            else { return role == kAXTextAreaRole }
+            else { return role == kAXTextAreaRole || isMessageLabeled || customComposer }
 
             let relativeY = (elementFrame.midY - rootFrame.minY) / rootFrame.height
             return relativeY > 0.5 && elementFrame.width > rootFrame.width * 0.25
         }
+        if matched == nil, !candidates.isEmpty {
+            let sample = candidates.prefix(4).map { element in
+                let editable: Bool = element.attributeOptional(kAXEditableAttribute) ?? false
+                return "role=\(element.role ?? "") subrole=\(element.subrole ?? "") editable=\(editable)"
+            }.joined(separator: ", ")
+            runner.log("friend composer candidates rejected: \(sample)")
+        }
+        return matched != nil
+    }
+
+    private func hasOneToOneChatAction(in root: UIElement) -> Bool {
+        // Keep this narrower than the action-discovery patterns above: an
+        // input-ready chat can itself expose a "메시지 보내기" control.
+        let patterns = ["1:1 채팅", "1:1대화", "채팅하기", "대화하기"]
+        let candidates = root.findAll(where: { element in
+            guard element.isEnabled else { return false }
+            let role = element.role ?? ""
+            return role == kAXButtonRole || role == kAXStaticTextRole || role == kAXRowRole || role == kAXCellRole
+        }, limit: 32, maxNodes: 800)
+        return candidates.contains { scoreElement($0, matching: patterns) > 100 }
     }
 
     private func usableChatTitle(_ rawTitle: String?) -> String? {
