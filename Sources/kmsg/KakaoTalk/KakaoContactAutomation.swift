@@ -465,10 +465,15 @@ struct KakaoContactAutomation {
             guard isNewWindow || titleMatches || focusChanged else { return nil }
 
             // Names are not a reliable discriminator: Kakao decorates the
-            // Friend result but may shorten the chat title. Verify the actual
-            // chat structure instead. A profile window cannot satisfy both a
-            // message composer and transcript context.
-            guard hasChatMessageContext(in: window) else { return nil }
+            // Friend result but may shorten the chat title. Verify a bounded,
+            // lower-window composer scan instead. A full transcript traversal
+            // is far too expensive on Kakao's AX tree and can stall for minutes.
+            let hasComposer = hasChatComposer(in: window)
+            runner.log(
+                "friend chat candidate title='\(window.title ?? "")' new=\(isNewWindow) " +
+                    "focusChanged=\(focusChanged) titleMatches=\(titleMatches) composer=\(hasComposer)"
+            )
+            guard hasComposer else { return nil }
 
             var score = 0
             if titleMatches { score += 2_000 }
@@ -480,13 +485,33 @@ struct KakaoContactAutomation {
         .window
     }
 
-    private func hasChatMessageContext(in root: UIElement) -> Bool {
-        MessageContextResolver(
-            kakao: kakao,
-            runner: runner,
-            useCache: false,
-            interactionMode: .backgroundSafe
-        ).resolve(in: root) != nil
+    private func hasChatComposer(in root: UIElement) -> Bool {
+        let candidates = root.findAll(where: { element in
+            guard element.isEnabled else { return false }
+            let role = element.role ?? ""
+            let editable: Bool = element.attributeOptional(kAXEditableAttribute) ?? false
+            return role == kAXTextAreaRole || role == kAXTextFieldRole || editable
+        }, limit: 24, maxNodes: 360)
+
+        return candidates.contains { element in
+            let role = element.role ?? ""
+            guard role != kAXStaticTextRole, role != kAXImageRole, element.subrole != "AXSearchField" else {
+                return false
+            }
+
+            let text = normalize(elementText(element))
+            guard !text.contains("검색"), !text.contains("search") else { return false }
+            let isMessageLabeled = (text.contains("메시지") || text.contains("message") || text.contains("입력")) &&
+                !text.contains("상태") && !text.contains("profile") && !text.contains("프로필")
+            guard role == kAXTextAreaRole || isMessageLabeled else { return false }
+
+            guard let rootFrame = root.frame, let elementFrame = element.frame,
+                  rootFrame.height > 0, rootFrame.width > 0
+            else { return role == kAXTextAreaRole }
+
+            let relativeY = (elementFrame.midY - rootFrame.minY) / rootFrame.height
+            return relativeY > 0.5 && elementFrame.width > rootFrame.width * 0.25
+        }
     }
 
     private func usableChatTitle(_ rawTitle: String?) -> String? {
