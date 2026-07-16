@@ -14,6 +14,8 @@ private enum ContactAutomationFailureCode: String {
     case searchFieldNotFound = "SEARCH_FIELD_NOT_FOUND"
     case inputNotReflected = "INPUT_NOT_REFLECTED"
     case friendResultNotFound = "FRIEND_RESULT_NOT_FOUND"
+    case chatStartUINotFound = "CHAT_START_UI_NOT_FOUND"
+    case chatWindowNotReady = "CHAT_WINDOW_NOT_READY"
 }
 
 struct KakaoContactAutomation {
@@ -26,16 +28,21 @@ struct KakaoContactAutomation {
     }
 
     func addFriend(kakaoID: String) throws -> KakaoFriendAddResult {
-        // Whatever happens, close the popover (and any profile window the add
-        // opens) before returning: leftover windows block the next automation —
-        // kmsg send misreads them as a login screen ("Enter KakaoTalk credentials").
-        // Then restore the CHATS tab: friend-add is the only automation that
-        // navigates to the friends tab, and leaving the main window there makes
-        // the next chat-list scan read friend rows (status messages) as chats —
-        // frozen previews downstream. The tab is friend-add's to put back.
+        // A first conversation does not exist in the Chats tab yet. Friend-add
+        // must therefore enter the 1:1 chat from the Friends result/profile and
+        // leave that input-ready window exposed for the following `kmsg send`.
+        // On failure, clear the partial UI. On success, preserve and re-raise the
+        // direct chat after putting the main list back on Chats behind it.
+        var openedChatWindow: UIElement?
         defer {
-            dismissLeftoverUI()
+            if openedChatWindow == nil {
+                dismissLeftoverUI()
+            }
             restoreChatsTab()
+            if let openedChatWindow {
+                kakao.activate()
+                _ = tryRaiseWindow(openedChatWindow, label: "opened friend chat")
+            }
         }
         let rootWindow = try requireMainListWindow()
         try navigateToFriends(in: rootWindow)
@@ -56,14 +63,24 @@ struct KakaoContactAutomation {
         try triggerSearch(in: idRoot, input: input)
         let resultRoot = waitForPopover(in: rootWindow) ?? idRoot
         let friendName = resolveFriendDisplayName(in: resultRoot, fallback: kakaoID)
-        // Already-friend cards have no 친구 추가 button — nothing to confirm; the
-        // resolved name is all the caller needs to open the chat.
-        if let addButton = bottomButton(in: resultRoot, matching: ["친구 추가"]) {
-            try pressFriendAddConfirmation(addButton)
-        } else {
-            runner.log("friend add: no add button on result card (already a friend); skipping confirm")
-        }
-        return KakaoFriendAddResult(friendName: friendName, chatTitle: friendName, externalChatID: nil)
+        let chatWindow = try openOneToOneChat(
+            from: resultRoot,
+            mainListWindow: rootWindow,
+            friendName: friendName
+        )
+        openedChatWindow = chatWindow
+
+        let resolvedChatTitle = chatWindow.title?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let chatTitle = resolvedChatTitle.flatMap { title in
+            let normalizedTitle = normalize(title)
+            let normalizedFriendName = normalize(friendName)
+            return !normalizedFriendName.isEmpty &&
+                (normalizedTitle == normalizedFriendName || normalizedTitle.contains(normalizedFriendName))
+                ? title
+                : nil
+        } ?? friendName
+        return KakaoFriendAddResult(friendName: friendName, chatTitle: chatTitle, externalChatID: nil)
     }
 
     // ESC closes the friend-add popover and the profile window KakaoTalk opens
@@ -283,6 +300,260 @@ struct KakaoContactAutomation {
         Thread.sleep(forTimeInterval: 0.3)
     }
 
+    private func openOneToOneChat(
+        from resultRoot: UIElement,
+        mainListWindow: UIElement,
+        friendName: String
+    ) throws -> UIElement {
+        // Snapshot before confirming a new friend. A new profile/chat window is
+        // then distinguishable from unrelated chat windows already on screen.
+        let windowsBeforeStart = kakao.windows
+        let chatPatterns = [
+            "1:1 채팅", "1:1대화", "채팅하기", "대화하기", "메시지 보내기",
+        ]
+
+        var actionRoot = resultRoot
+        var chatAction: UIElement
+        if let existingFriendChat = bottomButton(in: resultRoot, matching: ["1:1 채팅", "1:1"]) {
+            runner.log("friend add: existing friend; opening 1:1 chat from result card")
+            chatAction = existingFriendChat
+        } else if let addButton = bottomButton(in: resultRoot, matching: ["친구 추가"]) {
+            try pressFriendAddConfirmation(addButton)
+
+            var resolvedAction: (element: UIElement, root: UIElement)?
+            let foundAction = runner.waitUntil(label: "friend profile 1:1 chat action", timeout: 3.0, pollInterval: 0.1) {
+                resolvedAction = findFreshChatStartAction(
+                    preferredRoot: resultRoot,
+                    mainListWindow: mainListWindow,
+                    windowsBeforeStart: windowsBeforeStart,
+                    matching: chatPatterns
+                )
+                return resolvedAction != nil
+            }
+            guard foundAction, let resolvedAction else {
+                throw KakaoTalkError.elementNotFound(
+                    "[\(ContactAutomationFailureCode.chatStartUINotFound.rawValue)] 1:1 chat action did not appear after adding '\(friendName)'"
+                )
+            }
+            actionRoot = resolvedAction.root
+            chatAction = resolvedAction.element
+        } else {
+            throw KakaoTalkError.elementNotFound(
+                "[\(ContactAutomationFailureCode.chatStartUINotFound.rawValue)] Friend result had neither Add Friend nor 1:1 Chat action"
+            )
+        }
+
+        var chatWindow: UIElement?
+        for attempt in 0..<3 where chatWindow == nil {
+            var actionAvailable = true
+            if attempt > 0 {
+                if let refreshedAction = findFreshChatStartAction(
+                    preferredRoot: resultRoot,
+                    mainListWindow: mainListWindow,
+                    windowsBeforeStart: windowsBeforeStart,
+                    matching: chatPatterns
+                ) {
+                    actionRoot = refreshedAction.root
+                    chatAction = refreshedAction.element
+                    runner.log("friend add: retrying refreshed 1:1 chat action (attempt \(attempt + 1))")
+                } else {
+                    // The action can disappear while Kakao is still turning the
+                    // profile into a chat. Keep waiting without clicking stale UI.
+                    runner.log("friend add: 1:1 action unavailable on retry; waiting for chat transition")
+                    actionAvailable = false
+                }
+            }
+
+            if actionAvailable {
+                try pressOneToOneChat(chatAction)
+            }
+
+            _ = runner.waitUntil(
+                label: "friend 1:1 chat ready attempt \(attempt + 1)",
+                timeout: attempt == 2 ? 2.8 : 1.6,
+                pollInterval: 0.1
+            ) {
+                chatWindow = findInputReadyChatWindow(
+                    friendName: friendName,
+                    excluding: mainListWindow,
+                    windowsBeforeStart: windowsBeforeStart
+                )
+                return chatWindow != nil
+            }
+        }
+        guard let chatWindow else {
+            throw KakaoTalkError.windowNotFound(
+                "[\(ContactAutomationFailureCode.chatWindowNotReady.rawValue)] 1:1 chat for '\(friendName)' did not expose a message input"
+            )
+        }
+
+        closeTransientProfileWindowIfNeeded(
+            actionRoot,
+            chatWindow: chatWindow,
+            mainListWindow: mainListWindow
+        )
+        runner.log("friend add: 1:1 chat ready title='\(chatWindow.title ?? friendName)'")
+        return chatWindow
+    }
+
+    private func findFreshChatStartAction(
+        preferredRoot: UIElement,
+        mainListWindow: UIElement,
+        windowsBeforeStart: [UIElement],
+        matching patterns: [String]
+    ) -> (element: UIElement, root: UIElement)? {
+        var roots: [UIElement] = []
+        if let focused = kakao.focusedWindow,
+           !windowsBeforeStart.contains(where: { sameElement($0, focused) })
+        {
+            roots.append(focused)
+        }
+        roots.append(contentsOf: kakao.windows.reversed().filter { window in
+            !windowsBeforeStart.contains(where: { sameElement($0, window) })
+        })
+        if let popover = findPopover(in: mainListWindow) ?? kakao.mainWindow.flatMap({ findPopover(in: $0) }) {
+            roots.append(popover)
+        }
+        roots.append(preferredRoot)
+
+        for root in deduplicate(roots) {
+            if let bottomAction = bottomButton(in: root, matching: patterns) {
+                return (bottomAction, root)
+            }
+            if let action = findActionCandidate(in: root, matching: patterns) {
+                return (action, root)
+            }
+        }
+        return nil
+    }
+
+    private func pressOneToOneChat(_ action: UIElement) throws {
+        // Kakao's result/profile actions can advertise AXPress while ignoring
+        // it. Use the same real click required by the add confirmation.
+        if let frame = action.frame {
+            runner.mouseClick(at: CGPoint(x: frame.midX, y: frame.midY), label: "friend 1:1 chat")
+            return
+        }
+        guard activate(action, label: "friend 1:1 chat") else {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.chatStartUINotFound.rawValue)] Could not activate 1:1 chat action"
+            )
+        }
+    }
+
+    private func findInputReadyChatWindow(
+        friendName: String,
+        excluding mainListWindow: UIElement,
+        windowsBeforeStart: [UIElement]
+    ) -> UIElement? {
+        var candidates: [UIElement] = []
+        if let focused = kakao.focusedWindow {
+            candidates.append(focused)
+        }
+        candidates.append(contentsOf: kakao.windows.reversed())
+
+        let normalizedFriendName = normalize(friendName)
+        return deduplicate(candidates).compactMap { window -> (window: UIElement, score: Int)? in
+            guard !sameElement(window, mainListWindow), hasMessageInput(in: window) else {
+                return nil
+            }
+
+            let isNewWindow = !windowsBeforeStart.contains { sameElement($0, window) }
+            let normalizedTitle = normalize(window.title ?? "")
+            let titleMatches = !normalizedFriendName.isEmpty &&
+                (normalizedTitle == normalizedFriendName || normalizedTitle.contains(normalizedFriendName))
+            // A newly opened profile may also expose editable controls. Require
+            // the chat window title to identify the intended friend rather than
+            // accepting any new input-bearing window.
+            guard titleMatches else { return nil }
+
+            var score = 0
+            if titleMatches { score += 2_000 }
+            if isNewWindow { score += 1_000 }
+            if let focused = kakao.focusedWindow, sameElement(focused, window) { score += 500 }
+            return (window, score)
+        }
+        .max { $0.score < $1.score }?
+        .window
+    }
+
+    private func hasMessageInput(in root: UIElement) -> Bool {
+        let candidates = root.findAll(where: { element in
+            guard element.isEnabled else { return false }
+            let role = element.role ?? ""
+            let editable: Bool = element.attributeOptional(kAXEditableAttribute) ?? false
+            return role == kAXTextAreaRole || role == kAXTextFieldRole || editable
+        }, limit: 72, maxNodes: 900)
+
+        return candidates.contains { element in
+            let role = element.role ?? ""
+            guard role != kAXStaticTextRole, role != kAXImageRole, element.subrole != "AXSearchField" else {
+                return false
+            }
+            let text = normalize(elementText(element))
+            guard !text.contains("검색"), !text.contains("search") else { return false }
+            let isMessageLabeled = (text.contains("메시지") || text.contains("message") || text.contains("입력")) &&
+                !text.contains("상태") && !text.contains("profile") && !text.contains("프로필")
+            guard role == kAXTextAreaRole || isMessageLabeled else { return false }
+
+            if let rootFrame = root.frame, let elementFrame = element.frame, rootFrame.height > 0, rootFrame.width > 0 {
+                let relativeY = (elementFrame.midY - rootFrame.minY) / rootFrame.height
+                return relativeY > 0.5 && elementFrame.width > rootFrame.width * 0.25
+            }
+            return role == kAXTextAreaRole
+        }
+    }
+
+    private func findActionCandidate(in root: UIElement, matching patterns: [String]) -> UIElement? {
+        let candidates = root.findAll(where: { element in
+            guard element.isEnabled else { return false }
+            let role = element.role ?? ""
+            return role == kAXButtonRole || role == "AXMenuButton" || role == "AXPopUpButton" ||
+                role == kAXStaticTextRole || role == kAXRowRole || role == kAXCellRole
+        }, limit: 120, maxNodes: 1_800)
+
+        return candidates.map { element in
+            (element: element, score: scoreElement(element, matching: patterns))
+        }
+        .filter { $0.score > 0 }
+        .max { $0.score < $1.score }?
+        .element
+    }
+
+    private func closeTransientProfileWindowIfNeeded(
+        _ actionRoot: UIElement,
+        chatWindow: UIElement,
+        mainListWindow: UIElement
+    ) {
+        guard actionRoot.role == kAXWindowRole,
+              !sameElement(actionRoot, chatWindow),
+              !sameElement(actionRoot, mainListWindow),
+              kakao.windows.contains(where: { sameElement($0, actionRoot) })
+        else { return }
+
+        if supportsAction("AXClose", on: actionRoot) {
+            do {
+                try actionRoot.performAction("AXClose")
+                runner.log("friend add: closed transient friend profile window")
+                return
+            } catch {
+                runner.log("friend add: transient profile AXClose failed (\(error))")
+            }
+        }
+        if tryRaiseWindow(actionRoot, label: "transient friend profile") {
+            runner.pressCommandW()
+            Thread.sleep(forTimeInterval: 0.15)
+        }
+    }
+
+    private func deduplicate(_ elements: [UIElement]) -> [UIElement] {
+        var unique: [UIElement] = []
+        for element in elements where !unique.contains(where: { sameElement($0, element) }) {
+            unique.append(element)
+        }
+        return unique
+    }
+
     private func requireBestTextInput(in root: UIElement, label: String) throws -> UIElement {
         guard let input = locateSearchField(in: root) ?? findBestTextInput(in: root) else {
             throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.searchFieldNotFound.rawValue)] \(label) not found")
@@ -450,14 +721,14 @@ struct KakaoContactAutomation {
         return false
     }
 
-    private func tryRaiseWindow(_ window: UIElement) -> Bool {
+    private func tryRaiseWindow(_ window: UIElement, label: String = "main list window") -> Bool {
         if supportsAction(kAXRaiseAction, on: window) {
             do {
                 try window.performAction(kAXRaiseAction)
-                runner.log("friend add: main list window raised via AXRaise")
+                runner.log("friend add: \(label) raised via AXRaise")
                 return true
             } catch {
-                runner.log("friend add: main list window AXRaise failed (\(error))")
+                runner.log("friend add: \(label) AXRaise failed (\(error))")
             }
         }
         return false

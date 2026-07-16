@@ -62,6 +62,28 @@ class FriendOpenProfileCommandContractTests(unittest.TestCase):
         self.assertIn("guard let addButton = findFriendAddButton(in: rootWindow)", source)
         self.assertIn("runner.mouseClick(at:", source)
 
+    def test_friend_add_opens_one_to_one_chat_before_returning(self) -> None:
+        source = CONTACT_AUTOMATION.read_text(encoding="utf-8")
+
+        resolve_name = source.index("let friendName = resolveFriendDisplayName")
+        open_chat = source.index("let chatWindow = try openOneToOneChat")
+        result = source.index("return KakaoFriendAddResult")
+        self.assertLess(resolve_name, open_chat)
+        self.assertLess(open_chat, result)
+        self.assertIn('"CHAT_START_UI_NOT_FOUND"', source)
+        self.assertIn('"CHAT_WINDOW_NOT_READY"', source)
+        self.assertIn('bottomButton(in: resultRoot, matching: ["1:1 채팅", "1:1"])', source)
+        self.assertIn('bottomButton(in: resultRoot, matching: ["친구 추가"])', source)
+        self.assertIn("try pressFriendAddConfirmation(addButton)", source)
+        self.assertIn("chatAction = existingFriendChat", source)
+        self.assertIn("try pressOneToOneChat(chatAction)", source)
+        self.assertIn('label: "friend 1:1 chat ready attempt', source)
+        self.assertIn("hasMessageInput(in: window)", source)
+        self.assertIn("guard titleMatches else", source)
+        self.assertIn("retrying refreshed 1:1 chat action", source)
+        self.assertIn("if openedChatWindow == nil", source)
+        self.assertIn('tryRaiseWindow(openedChatWindow, label: "opened friend chat")', source)
+
     def test_open_profile_automation_has_actionable_failure_codes(self) -> None:
         source = OPEN_PROFILE_AUTOMATION.read_text(encoding="utf-8")
 
