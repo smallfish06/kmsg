@@ -70,16 +70,11 @@ struct KakaoContactAutomation {
         )
         openedChatWindow = chatWindow
 
-        let resolvedChatTitle = chatWindow.title?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let chatTitle = resolvedChatTitle.flatMap { title in
-            let normalizedTitle = normalize(title)
-            let normalizedFriendName = normalize(friendName)
-            return !normalizedFriendName.isEmpty &&
-                (normalizedTitle == normalizedFriendName || normalizedTitle.contains(normalizedFriendName))
-                ? title
-                : nil
-        } ?? friendName
+        // The result card can show a decorated name (for example
+        // "주철민(Ju,Chulmin)") while the actual chat window title is shorter.
+        // Return the verified chat's real non-generic title so the following
+        // `kmsg send` resolves that already-open window without Chats search.
+        let chatTitle = usableChatTitle(chatWindow.title) ?? friendName
         return KakaoFriendAddResult(friendName: friendName, chatTitle: chatTitle, externalChatID: nil)
     }
 
@@ -308,6 +303,7 @@ struct KakaoContactAutomation {
         // Snapshot before confirming a new friend. A new profile/chat window is
         // then distinguishable from unrelated chat windows already on screen.
         let windowsBeforeStart = kakao.windows
+        let focusedWindowBeforeStart = kakao.focusedWindow
         let chatPatterns = [
             "1:1 채팅", "1:1대화", "채팅하기", "대화하기", "메시지 보내기",
         ]
@@ -376,7 +372,8 @@ struct KakaoContactAutomation {
                 chatWindow = findInputReadyChatWindow(
                     friendName: friendName,
                     excluding: mainListWindow,
-                    windowsBeforeStart: windowsBeforeStart
+                    windowsBeforeStart: windowsBeforeStart,
+                    focusedWindowBeforeStart: focusedWindowBeforeStart
                 )
                 return chatWindow != nil
             }
@@ -444,64 +441,64 @@ struct KakaoContactAutomation {
     private func findInputReadyChatWindow(
         friendName: String,
         excluding mainListWindow: UIElement,
-        windowsBeforeStart: [UIElement]
+        windowsBeforeStart: [UIElement],
+        focusedWindowBeforeStart: UIElement?
     ) -> UIElement? {
         var candidates: [UIElement] = []
-        if let focused = kakao.focusedWindow {
-            candidates.append(focused)
+        let focusedWindowAfterClick = kakao.focusedWindow
+        if let focusedWindowAfterClick {
+            candidates.append(focusedWindowAfterClick)
         }
         candidates.append(contentsOf: kakao.windows.reversed())
 
         let normalizedFriendName = normalize(friendName)
         return deduplicate(candidates).compactMap { window -> (window: UIElement, score: Int)? in
-            guard !sameElement(window, mainListWindow), hasMessageInput(in: window) else {
-                return nil
-            }
+            guard !sameElement(window, mainListWindow), usableChatTitle(window.title) != nil else { return nil }
 
             let isNewWindow = !windowsBeforeStart.contains { sameElement($0, window) }
+            let isFocusedAfterClick = focusedWindowAfterClick.map { sameElement($0, window) } ?? false
+            let focusChanged = isFocusedAfterClick &&
+                !(focusedWindowBeforeStart.map { sameElement($0, window) } ?? false)
             let normalizedTitle = normalize(window.title ?? "")
             let titleMatches = !normalizedFriendName.isEmpty &&
                 (normalizedTitle == normalizedFriendName || normalizedTitle.contains(normalizedFriendName))
-            // A newly opened profile may also expose editable controls. Require
-            // the chat window title to identify the intended friend rather than
-            // accepting any new input-bearing window.
-            guard titleMatches else { return nil }
+            guard isNewWindow || titleMatches || focusChanged else { return nil }
+
+            // Names are not a reliable discriminator: Kakao decorates the
+            // Friend result but may shorten the chat title. Verify the actual
+            // chat structure instead. A profile window cannot satisfy both a
+            // message composer and transcript context.
+            guard hasChatMessageContext(in: window) else { return nil }
 
             var score = 0
             if titleMatches { score += 2_000 }
             if isNewWindow { score += 1_000 }
-            if let focused = kakao.focusedWindow, sameElement(focused, window) { score += 500 }
+            if focusChanged { score += 500 }
             return (window, score)
         }
         .max { $0.score < $1.score }?
         .window
     }
 
-    private func hasMessageInput(in root: UIElement) -> Bool {
-        let candidates = root.findAll(where: { element in
-            guard element.isEnabled else { return false }
-            let role = element.role ?? ""
-            let editable: Bool = element.attributeOptional(kAXEditableAttribute) ?? false
-            return role == kAXTextAreaRole || role == kAXTextFieldRole || editable
-        }, limit: 72, maxNodes: 900)
+    private func hasChatMessageContext(in root: UIElement) -> Bool {
+        MessageContextResolver(
+            kakao: kakao,
+            runner: runner,
+            useCache: false,
+            interactionMode: .backgroundSafe
+        ).resolve(in: root) != nil
+    }
 
-        return candidates.contains { element in
-            let role = element.role ?? ""
-            guard role != kAXStaticTextRole, role != kAXImageRole, element.subrole != "AXSearchField" else {
-                return false
-            }
-            let text = normalize(elementText(element))
-            guard !text.contains("검색"), !text.contains("search") else { return false }
-            let isMessageLabeled = (text.contains("메시지") || text.contains("message") || text.contains("입력")) &&
-                !text.contains("상태") && !text.contains("profile") && !text.contains("프로필")
-            guard role == kAXTextAreaRole || isMessageLabeled else { return false }
-
-            if let rootFrame = root.frame, let elementFrame = element.frame, rootFrame.height > 0, rootFrame.width > 0 {
-                let relativeY = (elementFrame.midY - rootFrame.minY) / rootFrame.height
-                return relativeY > 0.5 && elementFrame.width > rootFrame.width * 0.25
-            }
-            return role == kAXTextAreaRole
+    private func usableChatTitle(_ rawTitle: String?) -> String? {
+        guard let title = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
+            return nil
         }
+        let normalized = normalize(title)
+        // AX identity already excludes the main list window. Only reject its
+        // truly generic app title; users can legitimately be named "친구" or
+        // "Chats" and those titles must remain usable.
+        let genericTitles: Set<String> = ["카카오톡", "kakaotalk"]
+        return genericTitles.contains(normalized) ? nil : title
     }
 
     private func findActionCandidate(in root: UIElement, matching patterns: [String]) -> UIElement? {

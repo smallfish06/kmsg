@@ -66,6 +66,8 @@ class ReadBackgroundSafeContractTests(unittest.TestCase):
 
         self.assertIn("interactionMode: ChatWindowInteractionMode = .allowUIAutomation", source)
         self.assertIn("background-safe mode; skipping chat window activation fallback", source)
+        self.assertIn("fields.filter { candidate in", source)
+        self.assertIn("isLikelyMessageInputElement(candidate, in: window)", source)
 
     def test_transcript_message_json_exposes_media_metadata(self) -> None:
         source = TRANSCRIPT_READER.read_text(encoding="utf-8")

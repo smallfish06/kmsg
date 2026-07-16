@@ -352,7 +352,10 @@ struct MessageContextResolver {
     }
 
     private func pickMessageInputField(from fields: [UIElement], in window: UIElement) -> UIElement? {
-        fields.sorted { lhs, rhs in
+        fields.filter { candidate in
+            isLikelyMessageInputElement(candidate, in: window)
+        }
+        .sorted { lhs, rhs in
             scoreMessageInputCandidate(lhs, in: window) > scoreMessageInputCandidate(rhs, in: window)
         }
         .first
