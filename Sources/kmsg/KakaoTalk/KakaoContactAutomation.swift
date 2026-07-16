@@ -37,10 +37,7 @@ struct KakaoContactAutomation {
             dismissLeftoverUI()
             restoreChatsTab()
         }
-        // Also clear anything a previous crashed run left open.
-        dismissLeftoverUI()
-
-        let rootWindow = try requireUsableWindow()
+        let rootWindow = try requireMainListWindow()
         try navigateToFriends(in: rootWindow)
         try openFriendAddUI(from: rootWindow)
         // Friend-add happens entirely inside an AXPopover. Require it: the main
@@ -83,15 +80,57 @@ struct KakaoContactAutomation {
         Thread.sleep(forTimeInterval: 0.2)
     }
 
-    private func requireUsableWindow() throws -> UIElement {
-        if let window = kakao.ensureMainWindow(timeout: 5.0, trace: { message in runner.log(message) }) {
-            return window
+    private func requireMainListWindow() throws -> UIElement {
+        // A standalone conversation window is a "usable" window to
+        // KakaoTalkApp.ensureMainWindow(), but it cannot host the Friends tab
+        // or the friend-add popover. Mirror chat discovery's recovery path:
+        // activate KakaoTalk, use Cmd+2 to restore the main list window, wait
+        // for that exact window, then raise it before any coordinate clicks.
+        guard kakao.ensureMainWindow(timeout: 5.0, trace: { message in runner.log(message) }) != nil else {
+            throw KakaoTalkError.windowNotFound("[\(ContactAutomationFailureCode.windowNotReady.rawValue)] Usable KakaoTalk window unavailable")
         }
-        throw KakaoTalkError.windowNotFound("[\(ContactAutomationFailureCode.windowNotReady.rawValue)] Usable KakaoTalk window unavailable")
+
+        kakao.activate()
+        Thread.sleep(forTimeInterval: 0.08)
+        // These key events are global. Clear a prior crashed run only after
+        // KakaoTalk is frontmost so Escape cannot land in another app.
+        dismissLeftoverUI()
+        runner.pressCommandTwo()
+
+        var listWindow: UIElement?
+        _ = runner.waitUntil(label: "friend add main list window restore", timeout: 1.4, pollInterval: 0.08) {
+            listWindow = kakao.chatListWindow
+            return listWindow != nil
+        }
+
+        if listWindow == nil {
+            // Activation does not reopen a main window that the user closed
+            // while leaving KakaoTalk running. Reopen once, then repeat the
+            // same deterministic Cmd+2 recovery before failing.
+            runner.log("friend add: main list window missing after Cmd+2; forcing app reopen")
+            _ = KakaoTalkApp.forceOpen(timeout: 0.8)
+            kakao.activate()
+            runner.pressCommandTwo()
+            _ = runner.waitUntil(label: "friend add main list window reopen", timeout: 1.4, pollInterval: 0.08) {
+                listWindow = kakao.chatListWindow
+                return listWindow != nil
+            }
+        }
+
+        guard let window = listWindow else {
+            throw KakaoTalkError.windowNotFound("[\(ContactAutomationFailureCode.windowNotReady.rawValue)] KakaoTalk main list window unavailable")
+        }
+
+        _ = tryRaiseWindow(window)
+        Thread.sleep(forTimeInterval: 0.15)
+        return window
     }
 
     private func currentRoot(preferred: UIElement) -> UIElement {
-        kakao.focusedWindow ?? kakao.mainWindow ?? kakao.windows.last ?? preferred
+        if preferred.role == "AXPopover" {
+            return preferred
+        }
+        return kakao.chatListWindow ?? kakao.mainWindow ?? kakao.focusedWindow ?? kakao.windows.last ?? preferred
     }
 
     private func navigateToFriends(in rootWindow: UIElement) throws {
@@ -99,8 +138,14 @@ struct KakaoContactAutomation {
             guard activate(friendsButton, label: "friends tab") else {
                 throw KakaoTalkError.actionFailed("[\(ContactAutomationFailureCode.friendsTabNotFound.rawValue)] Could not activate Friends tab")
             }
-            _ = runner.waitUntil(label: "friends tab content", timeout: 0.5, pollInterval: 0.05) {
-                currentRoot(preferred: rootWindow).findFirst(identifier: "friends") != nil
+            // The navigation button exists on every tab, so checking for it
+            // returns immediately and races the actual content transition.
+            // Wait for a Friends-only control before resolving/clicking it.
+            let ready = runner.waitUntil(label: "friends tab content", timeout: 1.2, pollInterval: 0.05) {
+                findFriendAddButton(in: rootWindow) != nil
+            }
+            guard ready else {
+                throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendAddUINotFound.rawValue)] Friends tab did not render the friend add button")
             }
             return
         }
@@ -113,24 +158,30 @@ struct KakaoContactAutomation {
         // exact-matches at the top score). Keep the patterns tight: the loose
         // "친구"/"추가"/"+" fallbacks also matched the sidebar Friends tab
         // (AXHelp "친구 (⌘1)") and could open the wrong thing.
-        let patterns = ["친구 추가", "친구추가", "add friend", "add friends"]
-        guard let addButton = findButton(in: currentRoot(preferred: rootWindow), matching: patterns) else {
-            throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendAddUINotFound.rawValue)] Friend add button not found")
-        }
         // The toolbar person+ button ignores AXPress/Enter (custom KakaoTalk
-        // control) — only a real mouse click opens the popover. Try activate
-        // once, then click the button center, re-checking for the popover each
-        // time. addFriend's guard reports the final failure if it never opens.
-        for attempt in 0..<3 {
-            if attempt == 0 {
-                _ = activate(addButton, label: "friend add button")
-            } else if let frame = addButton.frame {
+        // control) — only a real mouse click opens the popover. Re-resolve the
+        // button after each attempt because the tab transition can invalidate
+        // its AX handle, and click its current center every time.
+        var foundButton = false
+        for _ in 0..<3 {
+            guard let addButton = findFriendAddButton(in: rootWindow) else { continue }
+            foundButton = true
+            if let frame = addButton.frame {
                 runner.mouseClick(at: CGPoint(x: frame.midX, y: frame.midY), label: "friend add button")
+            } else {
+                _ = activate(addButton, label: "friend add button")
             }
             if waitForPopover(in: rootWindow) != nil {
                 return
             }
         }
+        if !foundButton {
+            throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendAddUINotFound.rawValue)] Friend add button not found")
+        }
+    }
+
+    private func findFriendAddButton(in root: UIElement) -> UIElement? {
+        findButton(in: root, matching: ["친구 추가", "친구추가", "add friend", "add friends"])
     }
 
     private func selectKakaoIDMode(in root: UIElement) throws {
@@ -396,6 +447,19 @@ struct KakaoContactAutomation {
             return true
         }
 
+        return false
+    }
+
+    private func tryRaiseWindow(_ window: UIElement) -> Bool {
+        if supportsAction(kAXRaiseAction, on: window) {
+            do {
+                try window.performAction(kAXRaiseAction)
+                runner.log("friend add: main list window raised via AXRaise")
+                return true
+            } catch {
+                runner.log("friend add: main list window AXRaise failed (\(error))")
+            }
+        }
         return false
     }
 

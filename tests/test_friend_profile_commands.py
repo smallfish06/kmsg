@@ -47,6 +47,21 @@ class FriendOpenProfileCommandContractTests(unittest.TestCase):
         self.assertIn("addFriend(kakaoID:", source)
         self.assertNotIn("assignMultiProfile(friend:", source)
 
+    def test_friend_add_restores_and_raises_main_list_window_before_navigation(self) -> None:
+        source = CONTACT_AUTOMATION.read_text(encoding="utf-8")
+
+        restore = source.index("let rootWindow = try requireMainListWindow()")
+        navigate = source.index("try navigateToFriends(in: rootWindow)")
+        self.assertLess(restore, navigate)
+        self.assertIn("runner.pressCommandTwo()", source)
+        self.assertIn("listWindow = kakao.chatListWindow", source)
+        self.assertIn("try window.performAction(kAXRaiseAction)", source)
+        self.assertIn("KakaoTalkApp.forceOpen", source)
+        self.assertIn("return kakao.chatListWindow ?? kakao.mainWindow", source)
+        self.assertIn("findFriendAddButton(in: rootWindow) != nil", source)
+        self.assertIn("guard let addButton = findFriendAddButton(in: rootWindow)", source)
+        self.assertIn("runner.mouseClick(at:", source)
+
     def test_open_profile_automation_has_actionable_failure_codes(self) -> None:
         source = OPEN_PROFILE_AUTOMATION.read_text(encoding="utf-8")
 
