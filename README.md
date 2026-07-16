@@ -121,7 +121,7 @@ kmsg chats [--verbose] [--limit <limit>] [--trace-ax] [--json] [--keep-window]
 ### read
 
 ```bash
-kmsg read <chat> [--limit <limit>] [--debug] [--trace-ax] [--keep-window] [--background-safe] [--deep-recovery] [--layout <layout>] [--json]
+kmsg read <chat> [--limit <limit>] [--debug] [--trace-ax] [--keep-window] [--background-safe] [--capture-images <dir>] [--deep-recovery] [--layout <layout>] [--json]
 ```
 
 - `-l, --limit <limit>`: 최대 메시지 개수 (기본값: 20)
@@ -129,6 +129,7 @@ kmsg read <chat> [--limit <limit>] [--debug] [--trace-ax] [--keep-window] [--bac
 - `--trace-ax`: AX 탐색/재시도 로그 출력
 - `-k, --keep-window`: 자동으로 연 채팅창과 리스트창 유지
 - `--background-safe`: 카카오톡 실행/활성화/자동 로그인/검색/채팅방 열기/창 크기 변경/자동 닫기를 하지 않고, 이미 노출된 매칭 채팅창만 읽음
+- `--capture-images <dir>`: 매칭된 카카오톡 창을 ScreenCaptureKit으로 한 번 캡처한 뒤, 메시지에서 감지된 사진 영역만 `<dir>`에 SHA-256 파일명의 JPEG(각 1MiB 이하)로 저장. 화면 기록 권한이 필요하며 `--background-safe`와 함께 사용할 수 없음
 - `--deep-recovery`: 빠른 탐색 실패 시 deep recovery 수행
 - `--layout <layout>`: `preserve`, `left`, `right`, `split-left`, `split-right`. 마케팅 작업자가 브라우저/광고툴과 화면을 나눠 쓸 때는 `split-left` 또는 `split-right`를 사용
 - `--json`: JSON 형식으로 출력
@@ -255,6 +256,7 @@ kmsg help cache
 ```bash
 kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json
 kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json --background-safe
+kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json --capture-images /tmp/kmsg-images
 ```
 
 ### 출력 형식
@@ -274,6 +276,18 @@ kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json --backgrou
       "link_count": 0,
       "has_attachment": false,
       "attachment_count": 0
+    },
+    {
+      "author": "홍길동",
+      "time_raw": "00:28",
+      "body": "[사진]",
+      "has_image": true,
+      "image_count": 1,
+      "image_paths": ["/tmp/kmsg-images/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg"],
+      "image_sha256": ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],
+      "link_count": 0,
+      "has_attachment": false,
+      "attachment_count": 0
     }
   ]
 }
@@ -288,6 +302,7 @@ kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json --backgrou
 - `messages[].time_raw`: UI에서 읽힌 시각 문자열(없으면 `null`)
 - `messages[].body`: 메시지 본문
 - `messages[].has_image` / `image_count`: 메시지에 포함된 이미지 존재 여부와 개수
+- `messages[].image_paths` / `image_sha256`: `--capture-images` 사용 시에만 포함되는 로컬 JPEG 절대 경로와 각 파일의 SHA-256. 두 배열은 `image_count`와 같은 순서·개수를 가짐
 - `messages[].link_count`: 본문에서 감지된 URL 링크 개수
 - `messages[].has_attachment` / `attachment_count`: 이미지를 **제외한** 파일 첨부(문서 등) 존재 여부와 개수. 이미지는 `image_count`로 별도 집계됩니다.
 
@@ -295,6 +310,8 @@ kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json --backgrou
 
 - `--json` 사용 시 JSON은 `stdout`으로만 출력됩니다.
 - `--trace-ax` 로그는 `stderr`로 분리되므로 OpenClaw 같은 파이프 연동에서 안전하게 사용할 수 있습니다.
+- 사진이 감지됐지만 같은 개수의 파일을 만들지 못하면 `IMAGE_CAPTURE_COUNT_MISMATCH`로 비정상 종료하며 성공 JSON을 출력하지 않습니다. 따라서 호출자는 해당 읽기 위치를 진행시키면 안 됩니다.
+- `--capture-images`를 쓰지 않은 기존 호출에는 `image_paths`와 `image_sha256`가 추가되지 않으며 ScreenCaptureKit 권한도 요구하지 않습니다.
 
 `watch --json`은 배열 하나를 반환하는 대신, 새 메시지가 감지될 때마다 pretty JSON 객체 하나씩을 연속 출력합니다.
 

@@ -29,6 +29,10 @@ struct ReadCommand: ParsableCommand {
             Use --background-safe to read only already exposed chat windows without launching,
             activating, logging in, searching, opening rows, resizing, or closing windows.
 
+            Use --capture-images <dir> to capture the resolved KakaoTalk window once and
+            save each detected message image as a JPEG under <dir>. Image capture cannot
+            be combined with --background-safe because ScreenCaptureKit reads pixels.
+
             When author is "(me)", the message was sent by you.
             """
     )
@@ -60,6 +64,12 @@ struct ReadCommand: ParsableCommand {
     )
     var backgroundSafe: Bool = false
 
+    @Option(
+        name: .long,
+        help: "Capture detected message images into this directory (incompatible with --background-safe)"
+    )
+    var captureImages: String?
+
     @Flag(
         name: .long,
         help: ArgumentHelp(
@@ -76,6 +86,10 @@ struct ReadCommand: ParsableCommand {
     var json: Bool = false
 
     func validate() throws {
+        if backgroundSafe, captureImages != nil {
+            throw ValidationError("--capture-images cannot be used together with --background-safe.")
+        }
+
         if let chatID, !chatID.isEmpty {
             guard chat == nil else {
                 throw ValidationError("Chat name cannot be provided together with --chat-id.")
@@ -172,7 +186,7 @@ struct ReadCommand: ParsableCommand {
             }
         }
 
-        let snapshot: TranscriptSnapshot
+        var snapshot: TranscriptSnapshot
         do {
             snapshot = try transcriptReader.readSnapshot(
                 from: window,
@@ -207,6 +221,14 @@ struct ReadCommand: ParsableCommand {
             print("No message body text extracted from transcript container.")
             print("Use 'kmsg inspect --window <n>' to inspect message nodes.")
             return
+        }
+
+        if let captureImages {
+            let capturer = try TranscriptImageCapturer(
+                outputDirectoryPath: captureImages,
+                runner: runner
+            )
+            snapshot = try capturer.captureImages(in: snapshot, from: window)
         }
 
         if json {

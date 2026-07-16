@@ -13,6 +13,14 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
     /// Calendar date of the message ("YYYY-MM-DD"), read from the time
     /// label's AXHelp tooltip. nil when the tooltip was unavailable.
     let date: String?
+    /// AX screen-space frames for the message images that survived the
+    /// transcript reader's avatar/icon filtering. These are intentionally not
+    /// encoded; `read --capture-images` uses them to crop one window capture.
+    let imageFrames: [CGRect]
+    /// Present only when `read --capture-images` was requested. Keeping these
+    /// optional preserves the existing JSON contract for normal reads.
+    let imagePaths: [String]?
+    let imageSHA256: [String]?
 
     var hasImage: Bool {
         imageCount > 0
@@ -32,6 +40,8 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         case linkCount = "link_count"
         case hasAttachment = "has_attachment"
         case attachmentCount = "attachment_count"
+        case imagePaths = "image_paths"
+        case imageSHA256 = "image_sha256"
     }
 
     init(
@@ -43,7 +53,10 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         attachmentCount: Int = 0,
         isSystem: Bool,
         logicalTimestamp: Date?,
-        date: String? = nil
+        date: String? = nil,
+        imageFrames: [CGRect] = [],
+        imagePaths: [String]? = nil,
+        imageSHA256: [String]? = nil
     ) {
         self.author = author
         self.timeRaw = timeRaw
@@ -54,6 +67,9 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         self.isSystem = isSystem
         self.logicalTimestamp = logicalTimestamp
         self.date = date
+        self.imageFrames = imageFrames
+        self.imagePaths = imagePaths
+        self.imageSHA256 = imageSHA256
     }
 
     func encode(to encoder: Encoder) throws {
@@ -67,6 +83,25 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         try container.encode(linkCount, forKey: .linkCount)
         try container.encode(hasAttachment, forKey: .hasAttachment)
         try container.encode(attachmentCount, forKey: .attachmentCount)
+        try container.encodeIfPresent(imagePaths, forKey: .imagePaths)
+        try container.encodeIfPresent(imageSHA256, forKey: .imageSHA256)
+    }
+
+    func withCapturedImages(paths: [String], sha256: [String]) -> TranscriptMessage {
+        TranscriptMessage(
+            author: author,
+            timeRaw: timeRaw,
+            body: body,
+            imageCount: imageCount,
+            linkCount: linkCount,
+            attachmentCount: attachmentCount,
+            isSystem: isSystem,
+            logicalTimestamp: logicalTimestamp,
+            date: date,
+            imageFrames: imageFrames,
+            imagePaths: paths,
+            imageSHA256: sha256
+        )
     }
 }
 
@@ -74,6 +109,9 @@ struct TranscriptSnapshot: Sendable {
     let chat: String
     let fetchedAt: Date
     let messages: [TranscriptMessage]
+    /// Visible transcript viewport in AX screen coordinates. Image capture
+    /// uses this to reject clipped thumbnails instead of saving a sliver.
+    let transcriptFrame: CGRect?
 
     var count: Int {
         messages.count
@@ -173,7 +211,8 @@ struct KakaoTalkTranscriptReader {
         return TranscriptSnapshot(
             chat: chatWindow.title ?? fallbackChatTitle,
             fetchedAt: referenceDate,
-            messages: displayMessages
+            messages: displayMessages,
+            transcriptFrame: context.transcriptRoot.frame
         )
     }
 
@@ -279,7 +318,10 @@ struct KakaoTalkTranscriptReader {
                 leftAnchorTimeRaw = analysis.timeRaw
             }
 
-            guard let bodyCandidate = analysis.bodyCandidate else {
+            let bodyCandidate = analysis.bodyCandidate ?? analysis.imageFrames.first.map {
+                MessageBodyCandidate(body: "[사진]", frame: $0)
+            }
+            guard let bodyCandidate else {
                 if skippedLogs < 10 {
                     if analysis.isSystemLikeRow {
                         runner.log("read: row[\(offset + 1)] skipped (system row)")
@@ -318,7 +360,8 @@ struct KakaoTalkTranscriptReader {
                     attachmentCount: analysis.attachmentCount,
                     isSystem: true,
                     logicalTimestamp: currentDateAnchor,
-                    date: resolvedDate
+                    date: resolvedDate,
+                    imageFrames: analysis.imageFrames
                 )
                 messages.append(message)
                 continue
@@ -357,7 +400,8 @@ struct KakaoTalkTranscriptReader {
                     dateAnchor: currentDateAnchor,
                     referenceDate: referenceDate
                 ),
-                date: resolvedDate
+                date: resolvedDate,
+                imageFrames: analysis.imageFrames
             )
             messages.append(message)
             if selectedLogs < 10 {
@@ -516,14 +560,13 @@ struct KakaoTalkTranscriptReader {
             rowFrame: cachedRowFrame,
             transcriptRoot: transcriptRoot
         )
-        let imageCount = messageImageFrames.count
         let attachmentMetadataCount = uniqueMetadataTokens.filter(isLikelyAttachmentMetadataToken).count
         let attachmentActionCount = uniqueButtonTitles.filter(isLikelyAttachmentButtonTitle).count
         // Attachments are non-image files; images are reported separately via imageCount.
         let attachmentCount = attachmentMetadataCount + attachmentActionCount
         let side = inferMessageSide(
-            bodyFrame: bestBody?.frame,
-            imageFrames: imageFrames,
+            bodyFrame: bestBody?.frame ?? messageImageFrames.first,
+            imageFrames: messageImageFrames,
             rowFrame: cachedRowFrame,
             transcriptRoot: transcriptRoot
         )
@@ -539,7 +582,7 @@ struct KakaoTalkTranscriptReader {
             timeRaw: metadata.timeRaw,
             side: side,
             rowFrame: cachedRowFrame,
-            imageCount: imageCount,
+            imageFrames: messageImageFrames,
             linkCount: max(linkElementCount, urlTokenCount),
             attachmentCount: attachmentCount,
             isSystemLikeRow: systemLikeRow,
@@ -1112,13 +1155,28 @@ struct KakaoTalkTranscriptReader {
         unique.reserveCapacity(messages.count)
 
         for message in messages {
-            let key = messageFingerprint(message)
+            let key = messageDeduplicationFingerprint(message)
             if seen.contains(key) { continue }
             seen.insert(key)
             unique.append(message)
         }
 
         return unique
+    }
+
+    private func messageDeduplicationFingerprint(_ message: TranscriptMessage) -> String {
+        let base = messageFingerprint(message)
+        guard message.body == "[사진]", !message.imageFrames.isEmpty else {
+            return base
+        }
+
+        // Consecutive image-only rows commonly share author and minute. Their
+        // filtered AX frames distinguish them within this snapshot without
+        // changing the stable fingerprint used by `watch` across snapshots.
+        let frames = message.imageFrames.map { frame in
+            "\(Int(frame.minX.rounded())):\(Int(frame.minY.rounded())):\(Int(frame.width.rounded())):\(Int(frame.height.rounded()))"
+        }.joined(separator: ",")
+        return "\(base)\u{1F}\(frames)"
     }
 
     private func shouldPromoteLinkTitle(for text: String) -> Bool {
@@ -1208,14 +1266,18 @@ private struct RowAnalysis {
     let timeRaw: String?
     let side: MessageSide
     let rowFrame: CGRect?
-    let imageCount: Int
+    let imageFrames: [CGRect]
     let linkCount: Int
     let attachmentCount: Int
     let isSystemLikeRow: Bool
     let axHelpDate: String?
 
+    var imageCount: Int {
+        imageFrames.count
+    }
+
     var referenceFrame: CGRect? {
-        bodyCandidate?.frame ?? rowFrame
+        bodyCandidate?.frame ?? imageFrames.first ?? rowFrame
     }
 }
 
