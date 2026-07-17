@@ -224,11 +224,27 @@ struct ReadCommand: ParsableCommand {
         }
 
         if let captureImages {
-            let capturer = try TranscriptImageCapturer(
-                outputDirectoryPath: captureImages,
-                runner: runner
-            )
-            snapshot = try capturer.captureImages(in: snapshot, from: window)
+            do {
+                let capturer = try TranscriptImageCapturer(
+                    outputDirectoryPath: captureImages,
+                    runner: runner
+                )
+                snapshot = try capturer.captureImages(in: snapshot, from: window)
+            } catch {
+                // Image capture is best-effort: a clipped thumbnail or a
+                // ScreenCaptureKit failure must not cost the caller the text
+                // messages it already read. Degrade to a no-image snapshot and
+                // report the reason on stderr for the bridge to fold into logs.
+                FileHandle.standardError.write(
+                    Data("read: image capture failed, returning messages without images: \(error.localizedDescription)\n".utf8)
+                )
+                snapshot = TranscriptSnapshot(
+                    chat: snapshot.chat,
+                    fetchedAt: snapshot.fetchedAt,
+                    messages: snapshot.messages.map { $0.withCapturedImages(paths: [], sha256: []) },
+                    transcriptFrame: snapshot.transcriptFrame
+                )
+            }
         }
 
         if json {

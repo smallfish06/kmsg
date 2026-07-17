@@ -1173,8 +1173,11 @@ struct KakaoTalkTranscriptReader {
         // Consecutive image-only rows commonly share author and minute. Their
         // filtered AX frames distinguish them within this snapshot without
         // changing the stable fingerprint used by `watch` across snapshots.
+        // %.0f instead of Int(...): AX can report non-finite frames (CGRect.null
+        // is +inf), and Int(CGFloat.infinity) traps the whole process (observed
+        // live as read dying with SIGTRAP on photo-bearing chats).
         let frames = message.imageFrames.map { frame in
-            "\(Int(frame.minX.rounded())):\(Int(frame.minY.rounded())):\(Int(frame.width.rounded())):\(Int(frame.height.rounded()))"
+            String(format: "%.0f:%.0f:%.0f:%.0f", frame.minX, frame.minY, frame.width, frame.height)
         }.joined(separator: ",")
         return "\(base)\u{1F}\(frames)"
     }
