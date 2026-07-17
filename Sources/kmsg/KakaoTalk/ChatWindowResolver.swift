@@ -834,7 +834,7 @@ struct ChatWindowResolver {
 
     private func windowContainsLikelyChatInput(_ window: UIElement) -> Bool {
         if window.findFirst(where: { element in
-            guard element.isEnabled else { return false }
+            guard element.isEffectivelyEnabled else { return false }
             return element.role == kAXTextAreaRole
         }) != nil {
             return true
@@ -846,7 +846,7 @@ struct ChatWindowResolver {
     }
 
     private func isLikelyMessageInputElement(_ element: UIElement, in window: UIElement? = nil) -> Bool {
-        guard element.isEnabled else { return false }
+        guard element.isEffectivelyEnabled else { return false }
         let role = element.role ?? ""
         if role == kAXTextAreaRole {
             return true

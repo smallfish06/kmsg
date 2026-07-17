@@ -317,12 +317,12 @@ struct MessageContextResolver {
     private func collectMessageInputCandidates(from root: UIElement, limit: Int = 80) -> [UIElement] {
         let nodeBudget = max(200, limit * 4)
         let roleCandidates = root.findAll(where: { element in
-            guard element.isEnabled else { return false }
+            guard element.isEffectivelyEnabled else { return false }
             return element.role == kAXTextAreaRole || element.role == kAXTextFieldRole
         }, limit: limit, maxNodes: nodeBudget)
 
         let editableCandidates = root.findAll(where: { element in
-            guard element.isEnabled else { return false }
+            guard element.isEffectivelyEnabled else { return false }
             let editable: Bool = element.attributeOptional(kAXEditableAttribute) ?? false
             guard editable else { return false }
             let role = element.role ?? ""
@@ -340,7 +340,7 @@ struct MessageContextResolver {
         while let element = cursor, hops < 4 {
             candidates.append(element)
             let textDescendants = element.findAll(where: { node in
-                guard node.isEnabled else { return false }
+                guard node.isEffectivelyEnabled else { return false }
                 return node.role == kAXTextAreaRole || node.role == kAXTextFieldRole
             }, limit: 8, maxNodes: 48)
             candidates.append(contentsOf: textDescendants)
@@ -403,7 +403,7 @@ struct MessageContextResolver {
     }
 
     private func isLikelyMessageInputElement(_ element: UIElement, in window: UIElement? = nil) -> Bool {
-        guard element.isEnabled else { return false }
+        guard element.isEffectivelyEnabled else { return false }
         let role = element.role ?? ""
         if role == kAXTextAreaRole {
             return true

@@ -127,6 +127,13 @@ public final class UIElement: @unchecked Sendable {
         attributeOptional(kAXEnabledAttribute) ?? false
     }
 
+    /// Enabled unless the element explicitly reports AXEnabled=false. KakaoTalk's
+    /// chat composer omits AXEnabled entirely, so `isEnabled` misclassifies it as
+    /// disabled; text-input detection must use this permissive variant.
+    public var isEffectivelyEnabled: Bool {
+        attributeOptional(kAXEnabledAttribute) ?? true
+    }
+
     public var isFocused: Bool {
         attributeOptional(kAXFocusedAttribute) ?? false
     }
