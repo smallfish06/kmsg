@@ -910,7 +910,10 @@ struct KakaoContactAutomation {
 
     private func hasChatComposer(in root: UIElement, stillShowsChatStartAction: Bool) -> Bool {
         let candidates = root.findAll(where: { element in
-            guard element.isEnabled else { return false }
+            // KakaoTalk's composer omits AXEnabled entirely (isEnabled would
+            // read false and hide it) — the same misclassification that broke
+            // read's input detection; only explicit AXEnabled=false rejects.
+            guard element.isEffectivelyEnabled else { return false }
             let role = element.role ?? ""
             let editable: Bool = element.attributeOptional(kAXEditableAttribute) ?? false
             return role == kAXTextAreaRole || role == kAXTextFieldRole || editable
