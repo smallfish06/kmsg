@@ -284,7 +284,11 @@ struct KakaoTalkTranscriptReader {
         referenceDate: Date,
         frameCache: FrameCache
     ) -> [TranscriptMessage] {
-        let analysisBudget = max(limit * 5, 60)
+        // Each row analysis costs ~30ms of AX round-trips, so the floor of 60
+        // made every limit-10 read analyze the entire visible transcript.
+        // 3x the limit still leaves ample room for date separators, system
+        // rows, and image fragments between real messages.
+        let analysisBudget = max(limit * 3, 24)
         let rowsToAnalyze = Array(rows.suffix(analysisBudget))
         let analyses = rowsToAnalyze.map {
             analyzeRow($0, transcriptRoot: transcriptRoot, referenceDate: referenceDate, frameCache: frameCache)

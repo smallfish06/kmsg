@@ -390,6 +390,20 @@ struct ChatWindowResolver {
         // id assignment for the found prefix matches what a full scan would
         // assign except when a same-title chat first appears beyond the
         // current horizon — a case the server refuses to bind anyway.
+        // Title-first fast path: the registry already knows the chat's
+        // display title, and extracting ONLY titles costs a fraction of the
+        // full title+preview registry scan. First-match-by-title carries the
+        // same duplicate-title ambiguity the registry match has for rows
+        // beyond the horizon — and the server refuses duplicate-title
+        // bindings anyway — so fall through to the registry scan only when
+        // no title matches at all.
+        if let fastRow = scanner.firstRow(titled: query, in: chatListWindow, limit: 200, trace: { message in
+            runner.log(message)
+        }) {
+            runner.log("chat_id: matched row by title '\(query)'")
+            return openMatchedRow(fastRow, query: query, in: chatListWindow, fallbackWindow: fallbackWindow)
+        }
+
         var snapshots: [ChatListSnapshotItem] = []
         var matchIndex: Int?
         for horizon in [20, 60, 200] {
@@ -417,6 +431,15 @@ struct ChatWindowResolver {
 
         let row = snapshots[matchIndex].element
         runner.log("chat_id: matched row title='\(snapshots[matchIndex].discovery.title)'")
+        return openMatchedRow(row, query: query, in: chatListWindow, fallbackWindow: fallbackWindow)
+    }
+
+    private func openMatchedRow(
+        _ row: UIElement,
+        query: String,
+        in chatListWindow: UIElement,
+        fallbackWindow: UIElement
+    ) -> UIElement? {
         kakao.activate()
         _ = tryRaiseWindow(chatListWindow)
 

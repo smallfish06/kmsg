@@ -113,6 +113,26 @@ struct ChatListScanner {
         return snapshots
     }
 
+    /// Title-only row lookup with early exit: extracts nothing but each row's
+    /// title and stops at the first match, skipping the preview extraction
+    /// and registry assignment that make a full scan cost ~0.1s per row.
+    /// Titles compare exactly because the expected title itself came from a
+    /// previous full scan's extractTitle.
+    func firstRow(titled expected: String, in window: UIElement, limit: Int, trace: ((String) -> Void)? = nil) -> UIElement? {
+        guard let container = resolveChatListContainer(in: window, trace: trace) else {
+            trace?("chats: chat list container unavailable")
+            return nil
+        }
+        let rows = collectChatItems(from: container, limit: limit)
+        for (index, row) in rows.enumerated() {
+            if extractTitle(from: row, trace: trace) == expected {
+                trace?("chats: title fast path matched row \(index + 1)")
+                return row
+            }
+        }
+        return nil
+    }
+
     /// The friends tab masquerades as a chat list: same row container, same
     /// titles (friend names), and a non-empty scan — but the "preview" is the
     /// friend's STATUS MESSAGE, which never changes with new messages
