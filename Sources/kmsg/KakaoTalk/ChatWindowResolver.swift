@@ -380,17 +380,37 @@ struct ChatWindowResolver {
         runner.log("chat_id: scanning chat list rows")
         standardizeReadableWindow(chatListWindow, label: "chat list window")
         let scanner = ChatListScanner()
-        let snapshots = scanner.scan(in: chatListWindow, limit: 200, trace: { message in
-            runner.log(message)
-        })
-        guard !snapshots.isEmpty else {
-            runner.log("chat_id: chat list scan returned no rows")
-            return nil
-        }
-
         let registry = ChatIdentityRegistryStore.shared
-        let assignedIDs = registry.assignChatIDs(for: snapshots.map(\.discovery))
-        guard let matchIndex = assignedIDs.firstIndex(of: chatID) else {
+
+        // Widen the scan instead of extracting all 200 rows up front: each
+        // row's title/preview costs an AX round-trip (~0.1s), so a full scan
+        // ran 20+ seconds while the target of a badge-triggered read — the
+        // chat that JUST received a message — sits at the top of the list.
+        // Rows already scanned keep their relative order at every horizon, so
+        // id assignment for the found prefix matches what a full scan would
+        // assign except when a same-title chat first appears beyond the
+        // current horizon — a case the server refuses to bind anyway.
+        var snapshots: [ChatListSnapshotItem] = []
+        var matchIndex: Int?
+        for horizon in [20, 60, 200] {
+            snapshots = scanner.scan(in: chatListWindow, limit: horizon, trace: { message in
+                runner.log(message)
+            })
+            guard !snapshots.isEmpty else {
+                runner.log("chat_id: chat list scan returned no rows")
+                return nil
+            }
+            let assignedIDs = registry.assignChatIDs(for: snapshots.map(\.discovery))
+            if let index = assignedIDs.firstIndex(of: chatID) {
+                matchIndex = index
+                break
+            }
+            if snapshots.count < horizon {
+                break
+            }
+            runner.log("chat_id: no match in top \(snapshots.count) rows; widening scan")
+        }
+        guard let matchIndex else {
             runner.log("chat_id: no visible chat row matched \(chatID)")
             return nil
         }
