@@ -51,6 +51,14 @@ enum TranscriptImageCaptureError: LocalizedError {
 struct TranscriptImageCapturer {
     static let maximumJPEGBytes = 1_048_576
 
+    /// Static so it outlives every SCStreamConfiguration that references it:
+    /// the backgroundColor property does not retain the CGColor on every
+    /// macOS release, and a temporary was freed by ARC before ScreenCaptureKit
+    /// copied the configuration — SIGTRAP in CFRetain ← CGColorCreateCopy ←
+    /// -[SCStreamConfiguration copyWithZone:] on the bridge host, persisting
+    /// across both NSColor.white.cgColor and an inline CGColor(srgbRed:).
+    static let captureBackgroundColor = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+
     private let outputDirectory: URL
     private let runner: AXActionRunner
 
@@ -193,11 +201,7 @@ struct TranscriptImageCapturer {
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.scalesToFit = true
         configuration.showsCursor = false
-        // A plain CGColor, NOT NSColor.white.cgColor: AppKit hands out an
-        // autoreleased CGColor that a no-runloop CLI can see deallocated by the
-        // time SCStreamConfiguration copies it — observed live as SIGTRAP in
-        // CFRetain ← CGColorCreateCopy ← -[SCStreamConfiguration copyWithZone:].
-        configuration.backgroundColor = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+        configuration.backgroundColor = Self.captureBackgroundColor
         configuration.queueDepth = 1
 
         let capturedSurface: CapturedSurfaceImage
@@ -476,7 +480,7 @@ struct TranscriptImageCapturer {
             return nil
         }
 
-        context.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+        context.setFillColor(Self.captureBackgroundColor)
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         context.interpolationQuality = .high
         context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
