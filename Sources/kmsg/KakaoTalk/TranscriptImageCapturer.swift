@@ -193,7 +193,11 @@ struct TranscriptImageCapturer {
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.scalesToFit = true
         configuration.showsCursor = false
-        configuration.backgroundColor = NSColor.white.cgColor
+        // A plain CGColor, NOT NSColor.white.cgColor: AppKit hands out an
+        // autoreleased CGColor that a no-runloop CLI can see deallocated by the
+        // time SCStreamConfiguration copies it — observed live as SIGTRAP in
+        // CFRetain ← CGColorCreateCopy ← -[SCStreamConfiguration copyWithZone:].
+        configuration.backgroundColor = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
         configuration.queueDepth = 1
 
         let capturedSurface: CapturedSurfaceImage
@@ -472,7 +476,7 @@ struct TranscriptImageCapturer {
             return nil
         }
 
-        context.setFillColor(NSColor.white.cgColor)
+        context.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         context.interpolationQuality = .high
         context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
