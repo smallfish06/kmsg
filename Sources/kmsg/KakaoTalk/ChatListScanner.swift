@@ -61,17 +61,22 @@ struct ChatListDiscovery {
     let title: String
     let lastMessage: String?
     let listIndex: Int
+    /// Unread badge count from the chat row ("300+" reads as 300); nil when
+    /// the row shows no badge.
+    let unread: Int?
 }
 
 struct ChatListEntry: Codable, Equatable {
     let title: String
     let chatID: String?
     let lastMessage: String?
+    let unread: Int?
 
     enum CodingKeys: String, CodingKey {
         case title
         case chatID = "chat_id"
         case lastMessage = "last_message"
+        case unread
     }
 }
 
@@ -99,7 +104,8 @@ struct ChatListScanner {
         for (index, row) in rows.enumerated() {
             let title = extractTitle(from: row, trace: trace)
             let preview = extractPreview(from: row, title: title, trace: trace)
-            let discovery = ChatListDiscovery(title: title, lastMessage: preview, listIndex: index)
+            let unread = extractUnread(from: row)
+            let discovery = ChatListDiscovery(title: title, lastMessage: preview, listIndex: index, unread: unread)
             snapshots.append(ChatListSnapshotItem(element: row, discovery: discovery))
         }
 
@@ -195,6 +201,21 @@ struct ChatListScanner {
 
         let discoveredRows = container.findAll(role: kAXRowRole, limit: limit, maxNodes: max(80, limit * 8))
         return deduplicateElements(discoveredRows)
+    }
+
+    /// The unread badge is a bare AXStaticText holding only the count (e.g.
+    /// "1", "300+"); title and timestamp texts never match isUnreadCountLike.
+    private func extractUnread(from row: UIElement) -> Int? {
+        let staticTexts = row.findAll(role: kAXStaticTextRole, limit: 12, maxNodes: 80)
+        for node in staticTexts {
+            guard let value = normalizedText(node.stringValue) ?? normalizedText(node.title),
+                  ChatTextNormalizer.isUnreadCountLike(value)
+            else { continue }
+            let digits = value.filter(\.isNumber)
+            guard let count = Int(digits), count > 0 else { continue }
+            return count
+        }
+        return nil
     }
 
     private func extractTitle(from row: UIElement, trace: ((String) -> Void)? = nil) -> String {

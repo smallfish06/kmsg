@@ -121,7 +121,8 @@ struct ChatsCommand: ParsableCommand {
             ChatListEntry(
                 title: snapshot.discovery.title,
                 chatID: chatID.isEmpty ? nil : chatID,
-                lastMessage: snapshot.discovery.lastMessage
+                lastMessage: snapshot.discovery.lastMessage,
+                unread: snapshot.discovery.unread
             )
         }
         if json {
