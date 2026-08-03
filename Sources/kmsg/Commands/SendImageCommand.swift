@@ -5,14 +5,22 @@ import Foundation
 struct SendImageCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "send-image",
-        abstract: "Send an image to a chat"
+        abstract: "Send an image to a chat",
+        discussion: """
+            Use either:
+              kmsg send-image <recipient> <image-path>
+              kmsg send-image --chat-id <chat-id> <image-path>
+            """
     )
 
-    @Argument(help: "Name of the chat or friend to send to")
-    var recipient: String
+    @Option(name: .long, help: "Send using a chat_id from 'kmsg chats'")
+    var chatID: String?
 
-    @Argument(help: "Path to the image file")
-    var imagePath: String
+    @Argument(help: "Recipient name, or image path when --chat-id is used")
+    var firstValue: String?
+
+    @Argument(help: "Image path when recipient is provided")
+    var secondValue: String?
 
     @Flag(name: .long, help: "Show AX traversal and retry details")
     var traceAX: Bool = false
@@ -25,6 +33,44 @@ struct SendImageCommand: ParsableCommand {
 
     @Flag(name: .long, help: "Enable deep window recovery when fast window detection fails")
     var deepRecovery: Bool = false
+
+    var recipient: String? {
+        guard chatID == nil else { return nil }
+        return firstValue
+    }
+
+    var imagePath: String {
+        if chatID == nil {
+            return secondValue ?? ""
+        }
+        return firstValue ?? ""
+    }
+
+    private var targetDescription: String {
+        if let chatID {
+            return "chat_id '\(chatID)'"
+        }
+        return "'\(recipient ?? "")'"
+    }
+
+    func validate() throws {
+        if let chatID, !chatID.isEmpty {
+            guard let firstValue, !firstValue.isEmpty else {
+                throw ValidationError("Image path is required when using --chat-id.")
+            }
+            guard secondValue == nil else {
+                throw ValidationError("Recipient cannot be provided together with --chat-id.")
+            }
+            return
+        }
+
+        guard let firstValue, !firstValue.isEmpty else {
+            throw ValidationError("Recipient is required.")
+        }
+        guard let secondValue, !secondValue.isEmpty else {
+            throw ValidationError("Image path is required.")
+        }
+    }
 
     func run() throws {
         guard AccessibilityPermission.ensureGranted() else {
@@ -49,16 +95,33 @@ struct SendImageCommand: ParsableCommand {
         )
 
         do {
-            print("Looking for chat with '\(recipient)'...")
-            let resolution = try chatWindowResolver.resolve(query: recipient)
+            print("Looking for chat with \(targetDescription)...")
+            // chat_id resolution reuses SendCommand's routing: existing window
+            // -> chat list row -> search fallback. The title path stays for
+            // callers without a registry id, but it opens the FIRST search
+            // result for a display name — wrong when two friends share one.
+            let resolution: ChatWindowResolution
+            if let chatID {
+                resolution = try chatWindowResolver.resolve(chatID: chatID)
+            } else {
+                resolution = try chatWindowResolver.resolve(query: recipient ?? "")
+            }
 
+            // Clear leftovers and close on EVERY exit path. A send whose
+            // confirmation click misreports failure can leave the pasted
+            // attachment behind as a per-chat draft, and KakaoTalk flushes
+            // that draft on the next window open — observed live as a
+            // duplicate photo sent minutes later by an unrelated read.
+            defer {
+                clearLeftoverDraft(in: resolution.window, runner: runner)
+                closeWindowsIfNeeded(
+                    resolution: resolution,
+                    kakao: kakao,
+                    resolver: chatWindowResolver,
+                    runner: runner
+                )
+            }
             try sendImageToWindow(imageURL, window: resolution.window, kakao: kakao, runner: runner)
-            closeWindowsIfNeeded(
-                resolution: resolution,
-                kakao: kakao,
-                resolver: chatWindowResolver,
-                runner: runner
-            )
         } catch {
             print("Failed to send image: \(error)")
             throw ExitCode.failure
@@ -96,7 +159,7 @@ struct SendImageCommand: ParsableCommand {
                     throw KakaoTalkError.elementNotFound("Send button not found on confirmation sheet")
                 }
                 runner.log("send-image: sheet vanished before button lookup; treating as success")
-                print("✓ Image sent to '\(recipient)'")
+                print("✓ Image sent to \(targetDescription)")
                 Thread.sleep(forTimeInterval: 0.5)
                 return
             }
@@ -111,10 +174,27 @@ struct SendImageCommand: ParsableCommand {
             Thread.sleep(forTimeInterval: 0.7)
         }
 
-        print("✓ Image sent to '\(recipient)'")
+        print("✓ Image sent to \(targetDescription)")
 
         // Give it a moment to finish sending
         Thread.sleep(forTimeInterval: 0.5)
+    }
+
+    // Remove anything still sitting in the chat input (and the clipboard copy
+    // of the image) before the window closes. KakaoTalk persists a non-empty
+    // input as a per-chat draft, and the next window open can send it.
+    private func clearLeftoverDraft(in window: UIElement, runner: AXActionRunner) {
+        NSPasteboard.general.clearContents()
+        runner.pressEscapeKey()
+        guard let input = window.findAll(role: kAXTextAreaRole, limit: 4, maxNodes: 200).first else {
+            runner.log("send-image: no input area found to clear")
+            return
+        }
+        try? input.focus()
+        Thread.sleep(forTimeInterval: 0.1)
+        runner.pressCommandA()
+        runner.pressDeleteKey()
+        runner.log("send-image: cleared input draft and clipboard")
     }
 
     private func closeWindowsIfNeeded(

@@ -244,6 +244,10 @@ struct AXActionRunner {
         pressKey(code: 9, flags: .maskCommand) // V
     }
 
+    func pressDeleteKey() {
+        pressKey(code: 51) // Backspace
+    }
+
     func typeTextDirect(_ text: String, label: String, perCharacterDelay: TimeInterval = 0.01) {
         typeText(text, perCharacterDelay: perCharacterDelay)
         log("\(label): typed without reflection check")
