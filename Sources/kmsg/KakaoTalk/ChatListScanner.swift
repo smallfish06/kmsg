@@ -24,6 +24,33 @@ enum ChatTextNormalizer {
         return String(scalars)
     }
 
+    /// Identity-matching normalizer. Names made entirely of punctuation or
+    /// symbols (e.g. "~.~") strict-normalize to the empty string, which used to
+    /// abort friend-add identity confirmation after the first message had
+    /// already been sent. Fall back to a lenient form that keeps those scalars
+    /// and only strips whitespace and zero-width characters, so both sides of a
+    /// comparison stay non-empty and still match exactly.
+    static func normalizeForMatch(_ text: String) -> String {
+        let strict = normalize(text)
+        if !strict.isEmpty { return strict }
+
+        let lowered = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: .current)
+            .lowercased()
+
+        var scalars = String.UnicodeScalarView()
+        scalars.reserveCapacity(lowered.unicodeScalars.count)
+        for scalar in lowered.unicodeScalars {
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) { continue }
+            if scalar.value == 0x200B || scalar.value == 0x200C || scalar.value == 0x200D || scalar.value == 0xFEFF {
+                continue
+            }
+            scalars.append(scalar)
+        }
+        return String(scalars)
+    }
+
     static func isTimeLikeValue(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         let parts = trimmed.split(separator: ":")

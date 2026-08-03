@@ -650,8 +650,8 @@ struct KakaoContactAutomation {
         opener: String,
         mainListWindow: UIElement
     ) throws -> String {
-        let normalizedTitle = ChatTextNormalizer.normalize(chatTitle)
-        let normalizedOpener = ChatTextNormalizer.normalize(opener)
+        let normalizedTitle = ChatTextNormalizer.normalizeForMatch(chatTitle)
+        let normalizedOpener = ChatTextNormalizer.normalizeForMatch(opener)
         guard !normalizedTitle.isEmpty, !normalizedOpener.isEmpty else {
             throw KakaoTalkError.actionFailed(
                 "[\(ContactAutomationFailureCode.chatIdentityNotConfirmed.rawValue)] Chat title or opener could not be normalized"
@@ -683,8 +683,8 @@ struct KakaoContactAutomation {
 
             let matches = snapshots.enumerated().filter { _, snapshot in
                 guard let lastMessage = snapshot.discovery.lastMessage else { return false }
-                return ChatTextNormalizer.normalize(snapshot.discovery.title) == normalizedTitle &&
-                    ChatTextNormalizer.normalize(lastMessage) == normalizedOpener
+                return ChatTextNormalizer.normalizeForMatch(snapshot.discovery.title) == normalizedTitle &&
+                    ChatTextNormalizer.normalizeForMatch(lastMessage) == normalizedOpener
             }
 
             if matches.count > 1 {
