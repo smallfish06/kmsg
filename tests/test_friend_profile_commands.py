@@ -10,6 +10,13 @@ CONTACT_AUTOMATION = REPO_ROOT / "Sources" / "kmsg" / "KakaoTalk" / "KakaoContac
 OPEN_PROFILE_AUTOMATION = REPO_ROOT / "Sources" / "kmsg" / "KakaoTalk" / "KakaoOpenProfileAutomation.swift"
 
 
+# The probe-only (--probe-ui) branches return single-line
+# `return KakaoFriendAddResult(...)` early exits before the chat is opened.
+# The real success return is the only multiline one, so anchor on it when
+# asserting flow order.
+SUCCESS_RESULT_ANCHOR = "return KakaoFriendAddResult(\n"
+
+
 class FriendOpenProfileCommandContractTests(unittest.TestCase):
     def test_friend_and_open_profile_commands_are_registered(self) -> None:
         source = KMSG_ENTRYPOINT.read_text(encoding="utf-8")
@@ -67,9 +74,9 @@ class FriendOpenProfileCommandContractTests(unittest.TestCase):
     def test_friend_add_opens_one_to_one_chat_before_returning(self) -> None:
         source = CONTACT_AUTOMATION.read_text(encoding="utf-8")
 
-        resolve_name = source.index("let friendName = resolveFriendDisplayName")
+        resolve_name = source.index("friendName = resolveFriendDisplayName")
         open_chat = source.index("let chatWindow = try openOneToOneChat")
-        result = source.index("return KakaoFriendAddResult")
+        result = source.index(SUCCESS_RESULT_ANCHOR)
         self.assertLess(resolve_name, open_chat)
         self.assertLess(open_chat, result)
         self.assertIn('"CHAT_START_UI_NOT_FOUND"', source)
@@ -105,7 +112,7 @@ class FriendOpenProfileCommandContractTests(unittest.TestCase):
         self.assertIn("func addFriend(kakaoID: String, message: String? = nil)", source)
         open_chat = source.index("let chatWindow = try openOneToOneChat")
         send_message = source.index("try sendFirstMessage(message, in: chatWindow)")
-        result = source.index("return KakaoFriendAddResult")
+        result = source.index(SUCCESS_RESULT_ANCHOR)
         self.assertLess(open_chat, send_message)
         self.assertLess(send_message, result)
 
@@ -132,7 +139,7 @@ class FriendOpenProfileCommandContractTests(unittest.TestCase):
         self.assertIn('case chatIdentityNotConfirmed = "CHAT_IDENTITY_NOT_CONFIRMED"', source)
         send_message = source.index("try sendFirstMessage(message, in: chatWindow)")
         confirm_identity = source.index("externalChatID = try confirmChatIdentity(")
-        result = source.index("return KakaoFriendAddResult")
+        result = source.index(SUCCESS_RESULT_ANCHOR)
         self.assertLess(send_message, confirm_identity)
         self.assertLess(confirm_identity, result)
         self.assertIn("runner.pressCommandTwo()", source[confirm_identity:])
@@ -142,8 +149,38 @@ class FriendOpenProfileCommandContractTests(unittest.TestCase):
         self.assertIn("if matches.count > 1", source)
         self.assertIn("let assignedIDs = registry.assignChatIDs", source)
         self.assertIn("externalChatID: externalChatID", source)
-        self.assertNotIn("externalChatID: nil", source)
+        # A nil identity is only legitimate on --probe-ui early exits, which
+        # never add a friend or open a chat. Any other nil is a fallback bug.
+        for line in source.splitlines():
+            if "externalChatID: nil" in line:
+                self.assertIn('"(probe)"', line)
         self.assertNotIn("usableChatTitle(chatWindow.title) ?? friendName", source)
+
+    def test_friend_add_by_phone_uses_contact_tab_and_converges_on_the_same_chat_flow(self) -> None:
+        command = FRIEND_COMMAND.read_text(encoding="utf-8")
+        source = CONTACT_AUTOMATION.read_text(encoding="utf-8")
+
+        self.assertIn("var phone: String?", command)
+        self.assertIn("var name: String?", command)
+        self.assertIn("var probeUI: Bool = false", command)
+        self.assertIn('"--kakao-id and --phone are mutually exclusive."', command)
+        self.assertIn('"--name is required when adding by --phone."', command)
+        self.assertIn("value.filter { $0.isNumber }", command)
+        self.assertIn('trimmedKakaoID != nil ? "kakao_id" : "phone"', command)
+
+        # The contact branch fills the 연락처 tab, then feeds the exact same
+        # openOneToOneChat / first-message / identity-confirmation flow as the
+        # kakao-id branch — no separate chat-opening path.
+        contact_branch = source.index("case .contact(let contactName, let phone):")
+        open_chat = source.index("let chatWindow = try openOneToOneChat")
+        self.assertLess(contact_branch, open_chat)
+        self.assertIn("try selectContactMode(in: popover)", source)
+        self.assertIn("try fillContactFields(name: contactName, phone: phone, in: contactRoot)", source)
+        self.assertIn("friendName = contactName", source)
+        # Probe-only exits are explicitly marked and never claim a chat identity.
+        for line in source.splitlines():
+            if "(probe)" in line and "return KakaoFriendAddResult" in line:
+                self.assertIn("externalChatID: nil", line)
 
     def test_open_profile_automation_has_actionable_failure_codes(self) -> None:
         source = OPEN_PROFILE_AUTOMATION.read_text(encoding="utf-8")
