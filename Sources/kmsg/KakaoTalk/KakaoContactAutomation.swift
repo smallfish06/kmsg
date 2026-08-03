@@ -66,7 +66,12 @@ struct KakaoContactAutomation {
         // On failure, clear the partial UI. On success, preserve and re-raise the
         // direct chat after putting the main list back on Chats behind it.
         var openedChatWindow: UIElement?
+        var keepUIForInspection = false
         defer {
+            if keepUIForInspection {
+                // Probe asked to leave the filled popover on screen for a
+                // human to inspect/capture. Skip all cleanup.
+            } else {
             if openedChatWindow == nil {
                 dismissLeftoverUI()
             }
@@ -74,6 +79,7 @@ struct KakaoContactAutomation {
             if let openedChatWindow {
                 kakao.activate()
                 _ = tryRaiseWindow(openedChatWindow, label: "opened friend chat")
+            }
             }
         }
         let rootWindow = try requireMainListWindow()
@@ -111,7 +117,8 @@ struct KakaoContactAutomation {
             let contactRoot = waitForPopover(in: rootWindow) ?? popover
             try fillContactFields(name: contactName, phone: phone, in: contactRoot)
             if probeOnly {
-                runner.log("friend add probe (contact): fields reflected; dismissing without adding")
+                keepUIForInspection = true
+                runner.log("friend add probe (contact): fields reflected; leaving the popover open for inspection")
                 return KakaoFriendAddResult(friendName: contactName, chatTitle: "(probe)", externalChatID: nil)
             }
             // Unlike ID mode there is no search step: the filled form enables
@@ -377,8 +384,66 @@ struct KakaoContactAutomation {
             )
         }
 
-        try setText(name, on: nameInput, label: "contact name input")
-        try setText(phone, on: phoneInput, label: "contact phone input")
+        try setVerbatimText(name, on: nameInput, label: "contact name input", comparison: .exact)
+        try setVerbatimText(phone, on: phoneInput, label: "contact phone input", comparison: .digitsOnly)
+    }
+
+    private enum VerbatimComparison {
+        case exact
+        // KakaoTalk reformats the phone field as you type (010-3864-5501),
+        // so only the digits are comparable.
+        case digitsOnly
+    }
+
+    // The generic setText verifier accepts ANY value change (after != before),
+    // which let a swallowed first keystroke pass live: '1(5501)' landed as
+    // '(5501)' and the friend was saved under the wrong name, breaking the
+    // 1:1 chat title match afterwards. The contact form has no search trigger
+    // to preserve, so demand the full string: settle focus before the first
+    // key, verify the exact readback, and clear + retype (AXValue as a last
+    // resort) until it matches.
+    private func setVerbatimText(
+        _ text: String,
+        on input: UIElement,
+        label: String,
+        comparison: VerbatimComparison
+    ) throws {
+        func matches(_ current: String?) -> Bool {
+            guard let current else { return false }
+            let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+            switch comparison {
+            case .exact:
+                return trimmed == text
+            case .digitsOnly:
+                return trimmed.filter(\.isNumber) == text.filter(\.isNumber)
+            }
+        }
+
+        for attempt in 1...3 {
+            guard runner.focusWithVerification(input, label: label, attempts: 2) else {
+                throw KakaoTalkError.actionFailed(
+                    "[\(ContactAutomationFailureCode.inputNotReflected.rawValue)] Could not focus \(label)"
+                )
+            }
+            _ = runner.setTextWithVerification("", on: input, label: "\(label) clear", attempts: 1)
+            // Let the field's input context settle so the first keystroke
+            // right after the focus click isn't swallowed.
+            Thread.sleep(forTimeInterval: 0.15)
+            runner.typeTextDirect(text, label: label)
+            if runner.waitUntil(label: "\(label) verbatim", timeout: 0.4, condition: { matches(input.stringValue) }) {
+                runner.log("\(label): verbatim reflected on attempt \(attempt)")
+                return
+            }
+            runner.log("\(label): verbatim mismatch on attempt \(attempt) (value='\(input.stringValue ?? "")')")
+        }
+
+        if runner.setTextWithVerification(text, on: input, label: label, attempts: 2), matches(input.stringValue) {
+            runner.log("\(label): verbatim reflected via AXValue fallback")
+            return
+        }
+        throw KakaoTalkError.actionFailed(
+            "[\(ContactAutomationFailureCode.inputNotReflected.rawValue)] \(label) did not reflect the requested text verbatim"
+        )
     }
 
     // Friend-add UI is an AXPopover inside the main window, not a separate
