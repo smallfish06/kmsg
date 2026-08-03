@@ -7,6 +7,25 @@ struct KakaoFriendAddResult {
     let externalChatID: String?
 }
 
+enum FriendAddTarget {
+    case kakaoID(String)
+    case contact(name: String, phone: String)
+
+    var displayName: String {
+        switch self {
+        case .kakaoID(let id): return id
+        case .contact(let name, _): return name
+        }
+    }
+
+    var identity: String {
+        switch self {
+        case .kakaoID(let id): return id
+        case .contact(_, let phone): return phone
+        }
+    }
+}
+
 private enum ContactAutomationFailureCode: String {
     case windowNotReady = "WINDOW_NOT_READY"
     case friendsTabNotFound = "FRIENDS_TAB_NOT_FOUND"
@@ -31,6 +50,14 @@ struct KakaoContactAutomation {
     }
 
     func addFriend(kakaoID: String, message: String? = nil) throws -> KakaoFriendAddResult {
+        try addFriend(target: .kakaoID(kakaoID), message: message)
+    }
+
+    func addFriend(
+        target: FriendAddTarget,
+        message: String? = nil,
+        probeOnly: Bool = false
+    ) throws -> KakaoFriendAddResult {
         // A first conversation does not exist in the Chats tab yet. Friend-add
         // must therefore enter the 1:1 chat from the Friends result/profile and
         // send its optional first message through that exact window in this
@@ -58,16 +85,41 @@ struct KakaoContactAutomation {
         guard let popover = waitForPopover(in: rootWindow) else {
             throw KakaoTalkError.elementNotFound("[\(ContactAutomationFailureCode.friendAddUINotFound.rawValue)] Friend add popover did not open")
         }
-        try selectKakaoIDMode(in: popover)
-        // Re-fetch after the mode switch swaps the popover's contents.
-        let idRoot = waitForPopover(in: rootWindow) ?? popover
-        let input = try requireBestTextInput(in: idRoot, label: "KakaoTalk ID input")
-        try setText(kakaoID, on: input, label: "KakaoTalk ID input")
-        // triggerSearch blocks until a result card renders (its bottom button):
-        // 친구 추가 for a new contact, 1:1 채팅 when the id is already a friend.
-        try triggerSearch(in: idRoot, input: input)
-        let resultRoot = waitForPopover(in: rootWindow) ?? idRoot
-        let friendName = resolveFriendDisplayName(in: resultRoot, fallback: kakaoID)
+        let resultRoot: UIElement
+        let friendName: String
+        switch target {
+        case .kakaoID(let kakaoID):
+            try selectKakaoIDMode(in: popover)
+            // Re-fetch after the mode switch swaps the popover's contents.
+            let idRoot = waitForPopover(in: rootWindow) ?? popover
+            let input = try requireBestTextInput(in: idRoot, label: "KakaoTalk ID input")
+            try setText(kakaoID, on: input, label: "KakaoTalk ID input")
+            if probeOnly {
+                runner.log("friend add probe (id): input reflected; dismissing without searching")
+                return KakaoFriendAddResult(friendName: kakaoID, chatTitle: "(probe)", externalChatID: nil)
+            }
+            // triggerSearch blocks until a result card renders (its bottom button):
+            // 친구 추가 for a new contact, 1:1 채팅 when the id is already a friend.
+            try triggerSearch(in: idRoot, input: input)
+            resultRoot = waitForPopover(in: rootWindow) ?? idRoot
+            friendName = resolveFriendDisplayName(in: resultRoot, fallback: kakaoID)
+        case .contact(let contactName, let phone):
+            // The popover opens on the 연락처 (name/phone) tab by default, but
+            // select it explicitly so a lingering ID-tab state from a prior run
+            // cannot leave the fields unreachable.
+            try selectContactMode(in: popover)
+            let contactRoot = waitForPopover(in: rootWindow) ?? popover
+            try fillContactFields(name: contactName, phone: phone, in: contactRoot)
+            if probeOnly {
+                runner.log("friend add probe (contact): fields reflected; dismissing without adding")
+                return KakaoFriendAddResult(friendName: contactName, chatTitle: "(probe)", externalChatID: nil)
+            }
+            // Unlike ID mode there is no search step: the filled form enables
+            // the bottom 친구 추가 button directly, which openOneToOneChat
+            // presses on this same popover.
+            resultRoot = waitForPopover(in: rootWindow) ?? contactRoot
+            friendName = contactName
+        }
         let chatWindow = try openOneToOneChat(
             from: resultRoot,
             mainListWindow: rootWindow,
@@ -254,6 +306,79 @@ struct KakaoContactAutomation {
             let lower = (placeholder ?? "").lowercased()
             return lower.contains("id") || lower.contains("아이디")
         }
+    }
+
+    private func selectContactMode(in root: UIElement) throws {
+        // 연락처 is the popover's default tab; if the phone field is already
+        // visible there is nothing to click.
+        if hasPhonePlaceholder(in: currentRoot(preferred: root)) { return }
+
+        let patterns = ["연락처", "연락처로", "contact", "contacts"]
+        guard let button = findButton(in: root, matching: patterns) ?? findStaticOrButton(in: root, matching: patterns) else {
+            // No tab control found — trust the default-tab layout and let the
+            // field lookup below fail loudly if the phone field truly isn't there.
+            return
+        }
+        // Same AXPress-deaf tab control as the ID tab: only a real mouse click
+        // switches modes. Retry until the phone field's placeholder appears.
+        for attempt in 0..<3 {
+            if attempt == 0 {
+                _ = activate(button, label: "contact mode")
+            } else if let frame = button.frame {
+                runner.mouseClick(at: CGPoint(x: frame.midX, y: frame.midY), label: "contact mode")
+            }
+            let switched = runner.waitUntil(label: "contact mode active", timeout: 0.6, pollInterval: 0.05) {
+                hasPhonePlaceholder(in: currentRoot(preferred: root))
+            }
+            if switched { return }
+        }
+    }
+
+    private func hasPhonePlaceholder(in root: UIElement) -> Bool {
+        let fields = root.findAll(where: { ($0.role ?? "") == kAXTextFieldRole }, limit: 12, maxNodes: 400)
+        return fields.contains { field in
+            let placeholder: String? = field.attributeOptional(kAXPlaceholderValueAttribute)
+            let lower = (placeholder ?? "").lowercased()
+            return lower.contains("전화") || lower.contains("번호") || lower.contains("phone")
+        }
+    }
+
+    private func fillContactFields(name: String, phone: String, in root: UIElement) throws {
+        let scope = findPopover(in: root) ?? root
+        let fields = scope.findAll(where: { isTextInput($0) }, limit: 12, maxNodes: 400)
+            .sorted { ($0.frame?.minY ?? 0) < ($1.frame?.minY ?? 0) }
+
+        func placeholderText(_ field: UIElement) -> String {
+            let placeholder: String? = field.attributeOptional(kAXPlaceholderValueAttribute)
+            return (placeholder ?? "").lowercased()
+        }
+        runner.log(
+            "contact fields: " + fields.map { "role=\($0.role ?? "") ph='\(placeholderText($0))'" }
+                .joined(separator: ", ")
+        )
+
+        let nameField = fields.first { field in
+            let text = placeholderText(field)
+            return text.contains("이름") || text.contains("name")
+        }
+        let phoneField = fields.first { field in
+            let text = placeholderText(field)
+            return text.contains("전화") || text.contains("번호") || text.contains("phone")
+        }
+
+        // Placeholder match first; fall back to layout order (이름 above
+        // 전화번호) only when both fields exist but are unlabeled.
+        guard let nameInput = nameField ?? (fields.count >= 2 ? fields[0] : nil),
+              let phoneInput = phoneField ?? (fields.count >= 2 ? fields[1] : nil),
+              !sameElement(nameInput, phoneInput)
+        else {
+            throw KakaoTalkError.elementNotFound(
+                "[\(ContactAutomationFailureCode.searchFieldNotFound.rawValue)] Contact name/phone fields not found in the friend-add popover"
+            )
+        }
+
+        try setText(name, on: nameInput, label: "contact name input")
+        try setText(phone, on: phoneInput, label: "contact phone input")
     }
 
     // Friend-add UI is an AXPopover inside the main window, not a separate
@@ -462,17 +587,19 @@ struct KakaoContactAutomation {
             )
         }
 
-        // Real key events keep Kakao's rich composer state in sync. AXValue is
-        // only a fallback, and both paths must reflect on an element that is a
-        // descendant of the exact window opened above.
-        var inputReady = runner.typeTextWithVerification(
+        // AXValue first, typing only as a fallback — the same order as the
+        // proven send path. Typed unicode injection can leave a Hangul
+        // composition artifact that duplicates the final syllable on Enter
+        // (live: "…테스트" arrived as "…테스트트"), which then breaks the exact
+        // opener match in confirmChatIdentity.
+        var inputReady = runner.setTextWithVerification(
             message,
             on: input,
             label: "friend first-message input",
             attempts: 1
         ) && input.stringValue == message
         if !inputReady {
-            inputReady = runner.setTextWithVerification(
+            inputReady = runner.typeTextWithVerification(
                 message,
                 on: input,
                 label: "friend first-message input",
