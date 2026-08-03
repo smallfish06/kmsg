@@ -208,10 +208,15 @@ struct SendImageCommand: ParsableCommand {
             return
         }
 
-        if resolver.closeWindow(resolution.window) {
+        if closeChatWindowWithRetry(resolution.window, resolver: resolver, runner: runner) {
             print("✓ Chat window closed.")
         } else {
-            runner.log("send-image: close window could not be verified")
+            // Loud and greppable on stdout: a chat window left open makes
+            // KakaoTalk auto-read every incoming message (no unread badge),
+            // which blinds the bridge's badge-triggered read loop — observed
+            // live 2026-08-03 as a user message sitting unanswered for 23
+            // minutes. The bridge watches for this marker.
+            print("⚠ WINDOW_LEFT_OPEN: chat window could not be closed after image send")
         }
 
         if let listWindow = kakao.chatListWindow,
@@ -223,6 +228,28 @@ struct SendImageCommand: ParsableCommand {
                 runner.log("send-image: chat list window could not be verified")
             }
         }
+    }
+
+    // A lingering confirmation sheet or send overlay can make AXClose, the
+    // close button, and cmd+w all bounce off. Escape dismisses whatever modal
+    // is in the way, then the close is retried and VERIFIED each time.
+    private func closeChatWindowWithRetry(
+        _ window: UIElement,
+        resolver: ChatWindowResolver,
+        runner: AXActionRunner
+    ) -> Bool {
+        for attempt in 1...3 {
+            if resolver.closeWindow(window) {
+                if attempt > 1 {
+                    runner.log("send-image: chat window closed on attempt \(attempt)")
+                }
+                return true
+            }
+            runner.log("send-image: close attempt \(attempt) unverified; pressing escape and retrying")
+            runner.pressEscapeKey()
+            Thread.sleep(forTimeInterval: 0.4)
+        }
+        return false
     }
 
     private func waitForConfirmationSheet(in window: UIElement, runner: AXActionRunner) -> UIElement? {

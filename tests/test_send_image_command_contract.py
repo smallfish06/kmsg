@@ -20,6 +20,20 @@ class SendImageCommandContractTests(unittest.TestCase):
         self.assertIn("chatWindowResolver.resolve(chatID:", source)
         self.assertIn("chatWindowResolver.resolve(query:", source)
 
+    def test_send_image_reports_unclosed_window_loudly(self) -> None:
+        """A window left open after the send must be retried, then reported.
+
+        An open chat window makes KakaoTalk auto-read incoming messages (no
+        unread badge), which blinds the bridge's badge-triggered read loop —
+        observed live 2026-08-03 as a 23-minute unanswered message. The close
+        is retried with Escape in between, and the final failure prints a
+        stdout marker the bridge watches for.
+        """
+        source = SEND_IMAGE_COMMAND.read_text(encoding="utf-8")
+
+        self.assertIn("closeChatWindowWithRetry", source)
+        self.assertIn("WINDOW_LEFT_OPEN", source)
+
     def test_send_image_validates_mutually_exclusive_targets(self) -> None:
         source = SEND_IMAGE_COMMAND.read_text(encoding="utf-8")
 
