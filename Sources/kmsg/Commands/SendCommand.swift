@@ -329,14 +329,20 @@ struct SendCommand: ParsableCommand {
             return
         }
 
-        if resolution.openedTransiently {
-            if resolver.closeWindow(resolution.window) {
-                print("✓ Chat window closed.")
-            } else {
-                runner.log("send: close window could not be verified")
-            }
+        // Close the chat window whether or not this send opened it. Leaving
+        // "existing" windows open let them accumulate: one silently failed
+        // close turned into a permanently open window (every later send saw
+        // .existingWindow and skipped closing), KakaoTalk's AX tree grew with
+        // each leak, and per-send latency climbed ~5s/hour until a restart —
+        // observed live 2026-08-04 as reply delays growing 5s → 25s overnight.
+        // An open window also auto-reads incoming messages (no unread badge),
+        // blinding the badge-triggered read loop.
+        if closeChatWindowWithRetry(resolution.window, resolver: resolver, runner: runner) {
+            print("✓ Chat window closed.")
         } else {
-            runner.log("send: existing chat window left open (not opened by send)")
+            // Loud and greppable on stdout — the bridge watches for this
+            // marker and forces a recovery read (which closes the window).
+            print("⚠ WINDOW_LEFT_OPEN: chat window could not be closed after send")
         }
 
         if !chatListWasOpen,
@@ -349,6 +355,29 @@ struct SendCommand: ParsableCommand {
                 runner.log("send: chat list window could not be verified")
             }
         }
+    }
+
+    // A lingering confirmation sheet or overlay can make AXClose, the close
+    // button, and cmd+w all bounce off. Escape dismisses whatever modal is in
+    // the way, then the close is retried and VERIFIED each time. Same recovery
+    // as send-image (which shipped it first in v1.260804.0).
+    private func closeChatWindowWithRetry(
+        _ window: UIElement,
+        resolver: ChatWindowResolver,
+        runner: AXActionRunner
+    ) -> Bool {
+        for attempt in 1...3 {
+            if resolver.closeWindow(window) {
+                if attempt > 1 {
+                    runner.log("send: chat window closed on attempt \(attempt)")
+                }
+                return true
+            }
+            runner.log("send: close attempt \(attempt) unverified; pressing escape and retrying")
+            runner.pressEscapeKey()
+            Thread.sleep(forTimeInterval: 0.4)
+        }
+        return false
     }
 
     private func resolveMessageInputField(chatWindow: UIElement, kakao: KakaoTalkApp, runner: AXActionRunner) -> UIElement? {
