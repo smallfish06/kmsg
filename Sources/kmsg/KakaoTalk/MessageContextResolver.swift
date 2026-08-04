@@ -134,15 +134,22 @@ struct MessageContextResolver {
             return cachedTranscriptRoot
         }
 
-        var candidates: [UIElement] = []
-
-        if let paneRoot {
-            candidates.append(contentsOf: collectTranscriptContainers(from: paneRoot))
+        // Staged discovery, cheapest first. Each later stage only runs when
+        // the previous one produced no positively scored candidate, because a
+        // full node-budget BFS over a chat window costs hundreds of AX
+        // round-trips (~2-10ms each) and the transcript scroll area sits at
+        // most a couple of container levels below the pane root.
+        var candidates = shallowTranscriptContainers(from: paneRoot ?? chatWindow)
+        if !hasPositivelyScoredCandidate(candidates, chatWindow: chatWindow, inputElement: inputElement) {
+            if let paneRoot {
+                candidates.append(contentsOf: collectTranscriptContainers(from: paneRoot))
+            }
+            candidates = deduplicateElements(candidates)
         }
-
-        candidates.append(contentsOf: collectTranscriptContainers(from: chatWindow))
-
-        candidates = deduplicateElements(candidates)
+        if !hasPositivelyScoredCandidate(candidates, chatWindow: chatWindow, inputElement: inputElement) {
+            candidates.append(contentsOf: collectTranscriptContainers(from: chatWindow))
+            candidates = deduplicateElements(candidates)
+        }
         if candidates.isEmpty {
             return nil
         }
@@ -178,6 +185,43 @@ struct MessageContextResolver {
 
         rememberCachedElement(slot: .transcriptRoot, root: cacheRoot, element: transcriptRoot)
         return transcriptRoot
+    }
+
+    private func hasPositivelyScoredCandidate(
+        _ candidates: [UIElement],
+        chatWindow: UIElement,
+        inputElement: UIElement
+    ) -> Bool {
+        candidates.contains { candidate in
+            scoreTranscriptContainerSpatial(candidate, chatWindow: chatWindow, inputElement: inputElement) > 0
+        }
+    }
+
+    /// Depth-limited walk collecting container-role children. The transcript
+    /// scroll area is a near-direct descendant of the pane root in every
+    /// observed KakaoTalk layout, so this finds it in tens of AX calls where
+    /// the node-budget BFS needs hundreds.
+    private func shallowTranscriptContainers(from root: UIElement) -> [UIElement] {
+        let containerRoles: Set<String> = [
+            kAXScrollAreaRole, kAXTableRole, kAXOutlineRole, kAXListRole, kAXGroupRole,
+        ]
+        var found: [UIElement] = []
+        var frontier = [root]
+        for _ in 0..<3 {
+            var nextFrontier: [UIElement] = []
+            for element in frontier {
+                for child in element.children {
+                    guard let role = child.role, containerRoles.contains(role) else { continue }
+                    found.append(child)
+                    nextFrontier.append(child)
+                }
+            }
+            frontier = nextFrontier
+            if frontier.isEmpty || found.count >= 12 {
+                break
+            }
+        }
+        return found
     }
 
     private func collectTranscriptContainers(from root: UIElement) -> [UIElement] {

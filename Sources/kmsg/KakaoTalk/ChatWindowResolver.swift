@@ -406,6 +406,7 @@ struct ChatWindowResolver {
 
         var snapshots: [ChatListSnapshotItem] = []
         var matchIndex: Int?
+        var friendsTabRecovered = false
         for horizon in [20, 60, 200] {
             snapshots = scanner.scan(in: chatListWindow, limit: horizon, trace: { message in
                 runner.log(message)
@@ -413,6 +414,25 @@ struct ChatWindowResolver {
             guard !snapshots.isEmpty else {
                 runner.log("chat_id: chat list scan returned no rows")
                 return nil
+            }
+            // The main window sitting on the friends tab scans "successfully"
+            // but yields friend rows whose titles never match a chat — the
+            // scan then widens to 200 rows and falls back to search, wasting
+            // ~10s. Mirror ChatsCommand: detect the timestamp-less friends
+            // list and switch to the chats tab (⌘2) once.
+            if !friendsTabRecovered, scanner.looksLikeFriendsList(snapshots, trace: { runner.log($0) }) {
+                friendsTabRecovered = true
+                runner.log("chat_id: scan looks like the FRIENDS list — switching to the chats tab (⌘2) and rescanning")
+                kakao.activate()
+                runner.pressCommandTwo()
+                Thread.sleep(forTimeInterval: 0.4)
+                snapshots = scanner.scan(in: chatListWindow, limit: horizon, trace: { message in
+                    runner.log(message)
+                })
+                guard !snapshots.isEmpty else {
+                    runner.log("chat_id: chat list scan returned no rows after tab recovery")
+                    return nil
+                }
             }
             let assignedIDs = registry.assignChatIDs(for: snapshots.map(\.discovery))
             if let index = assignedIDs.firstIndex(of: chatID) {

@@ -225,18 +225,55 @@ struct KakaoTalkTranscriptReader {
         let targetRowCount = max(messageLimit * 4, 50)
         var rows: [UIElement] = []
 
-        rows.append(contentsOf: directRowChildren(from: transcriptRoot))
-
-        let containerCandidates = transcriptRoot.findAll(where: { element in
-            guard let role = element.role else { return false }
-            return role == kAXTableRole || role == kAXOutlineRole || role == kAXListRole || role == kAXScrollAreaRole
-        }, limit: 8, maxNodes: 900)
-
-        for container in containerCandidates {
-            rows.append(contentsOf: directRowChildren(from: container))
+        // Fast path: every observed KakaoTalk transcript nests rows as
+        // AXScrollArea > AXTable > AXRow, so a depth-limited walk over
+        // container children reaches them in ~(row count) AX calls. The
+        // node-budget BFS below wanders into every bubble's subtree
+        // (900-3000 visits at 2-10ms of IPC each ≈ 20s) and is kept only
+        // as a fallback for layouts the shallow walk cannot see.
+        let containerRoles: Set<String> = [
+            kAXScrollAreaRole, kAXTableRole, kAXOutlineRole, kAXListRole, kAXGroupRole,
+        ]
+        var frontier = [transcriptRoot]
+        var depth = 0
+        while depth < 4, !frontier.isEmpty, rows.count < targetRowCount {
+            var nextFrontier: [UIElement] = []
+            for container in frontier {
+                for child in container.children {
+                    guard let role = child.role else { continue }
+                    if role == kAXRowRole {
+                        rows.append(child)
+                    } else if containerRoles.contains(role) {
+                        nextFrontier.append(child)
+                    }
+                }
+            }
+            frontier = nextFrontier
+            depth += 1
+        }
+        if !rows.isEmpty {
+            runner.log("read: transcript rows via shallow container walk depth=\(depth)")
         }
 
-        if rows.count < targetRowCount {
+        if rows.isEmpty {
+            let found = transcriptRoot.findAll(
+                roles: [kAXTableRole, kAXOutlineRole, kAXListRole, kAXScrollAreaRole],
+                roleLimits: [
+                    kAXTableRole: 8,
+                    kAXOutlineRole: 8,
+                    kAXListRole: 8,
+                    kAXScrollAreaRole: 8,
+                ],
+                maxNodes: 900
+            )
+            for containers in found.values {
+                for container in containers {
+                    rows.append(contentsOf: directRowChildren(from: container))
+                }
+            }
+        }
+
+        if rows.isEmpty {
             let bfsRows = transcriptRoot.findAll(
                 role: kAXRowRole,
                 limit: max(targetRowCount * 3, 240),
@@ -290,9 +327,87 @@ struct KakaoTalkTranscriptReader {
         // rows, and image fragments between real messages.
         let analysisBudget = max(limit * 3, 24)
         let rowsToAnalyze = Array(rows.suffix(analysisBudget))
-        let analyses = rowsToAnalyze.map {
-            analyzeRow($0, transcriptRoot: transcriptRoot, referenceDate: referenceDate, frameCache: frameCache)
+        let fallbackThreshold = max(3, min(limit / 2, 8))
+
+        var messages = parseMessages(
+            from: rowsToAnalyze,
+            transcriptRoot: transcriptRoot,
+            limit: limit,
+            includeSystemMessages: includeSystemMessages,
+            referenceDate: referenceDate,
+            frameCache: frameCache
+        )
+
+        // A freshly opened chat window materializes offscreen rows' AX
+        // subtrees a beat after the visible ones, so a sparse parse right
+        // after opening usually means "not loaded yet", not "short chat".
+        // One short wait and re-parse recovers real rows (author, side,
+        // dates, image frames) before resorting to the flat text fallback.
+        if messages.count < fallbackThreshold, rowsToAnalyze.count > messages.count * 2 {
+            runner.log("read: sparse parse (\(messages.count) messages from \(rowsToAnalyze.count) rows); waiting for row materialization")
+            Thread.sleep(forTimeInterval: 0.35)
+            messages = parseMessages(
+                from: rowsToAnalyze,
+                transcriptRoot: transcriptRoot,
+                limit: limit,
+                includeSystemMessages: includeSystemMessages,
+                referenceDate: referenceDate,
+                frameCache: frameCache
+            )
         }
+
+        runner.log("read: row parser messages=\(messages.count)")
+
+        if messages.isEmpty || messages.count < fallbackThreshold {
+            let fallback = extractFallbackMessages(from: transcriptRoot, limit: limit, referenceDate: referenceDate)
+            runner.log("read: fallback messages=\(fallback.count)")
+            messages.append(contentsOf: fallback)
+        }
+
+        return Array(deduplicateMessagesPreservingOrder(messages).suffix(limit))
+    }
+
+    private func parseMessages(
+        from rowsToAnalyze: [UIElement],
+        transcriptRoot: UIElement,
+        limit: Int,
+        includeSystemMessages: Bool,
+        referenceDate: Date,
+        frameCache: FrameCache
+    ) -> [TranscriptMessage] {
+        // Analyze bottom-up and stop once enough message-yielding rows have
+        // surfaced: only the last `limit` messages survive anyway, and each
+        // row analysis costs hundreds of AX round-trips. A small margin
+        // absorbs rows that dedup or system filtering later removes.
+        let yieldTarget = limit + 2
+        var reversedAnalyses: [RowAnalysis] = []
+        reversedAnalyses.reserveCapacity(min(rowsToAnalyze.count, yieldTarget * 2))
+        var yields = 0
+        for row in rowsToAnalyze.reversed() {
+            let analysis = analyzeRow(row, transcriptRoot: transcriptRoot, referenceDate: referenceDate, frameCache: frameCache)
+            reversedAnalyses.append(analysis)
+            let yieldsMessage = (analysis.bodyCandidate != nil || !analysis.imageFrames.isEmpty)
+                && (includeSystemMessages || !analysis.isSystemLikeRow)
+            if yieldsMessage {
+                yields += 1
+            }
+            if yields >= yieldTarget {
+                // Keep climbing while the topmost analyzed row is a left-side
+                // bubble without its own author label: its author lives on an
+                // earlier row of the same segment, and cutting here would
+                // mislabel it as "(me)".
+                let needsAuthorAnchor = analysis.side == .left
+                    && analysis.explicitAuthor == nil
+                    && !analysis.isSystemLikeRow
+                if !needsAuthorAnchor {
+                    break
+                }
+            }
+        }
+        if reversedAnalyses.count < rowsToAnalyze.count {
+            runner.log("read: row analysis early stop after \(reversedAnalyses.count)/\(rowsToAnalyze.count) rows")
+        }
+        let analyses = Array(reversedAnalyses.reversed())
 
         var messages: [TranscriptMessage] = []
         messages.reserveCapacity(min(analyses.count, limit * 2))
@@ -416,15 +531,7 @@ struct KakaoTalkTranscriptReader {
             }
         }
 
-        runner.log("read: row parser messages=\(messages.count)")
-
-        if messages.isEmpty || messages.count < max(3, min(limit / 2, 8)) {
-            let fallback = extractFallbackMessages(from: transcriptRoot, limit: limit, referenceDate: referenceDate)
-            runner.log("read: fallback messages=\(fallback.count)")
-            messages.append(contentsOf: fallback)
-        }
-
-        return Array(deduplicateMessagesPreservingOrder(messages).suffix(limit))
+        return messages
     }
 
     private func directRowChildren(from element: UIElement) -> [UIElement] {
@@ -481,6 +588,11 @@ struct KakaoTalkTranscriptReader {
             ].compactMap { $0 }
 
             if !missingRoles.isEmpty {
+                // When direct children already yielded body text, the scan
+                // only backfills media/metadata roles; keep it shallow so a
+                // huge bubble subtree (e.g. mail-notification chats) does not
+                // cost a full 140-node walk per row.
+                let bodyMissing = textAreas.isEmpty && staticTexts.isEmpty
                 let found = container.findAll(
                     roles: Set(missingRoles),
                     roleLimits: [
@@ -490,7 +602,7 @@ struct KakaoTalkTranscriptReader {
                         kAXButtonRole: 6,
                         kAXLinkRole: 6,
                     ],
-                    maxNodes: 140
+                    maxNodes: bodyMissing ? 140 : 60
                 )
                 if textAreas.isEmpty { textAreas = found[kAXTextAreaRole] ?? [] }
                 if staticTexts.isEmpty { staticTexts = found[kAXStaticTextRole] ?? [] }
@@ -500,10 +612,11 @@ struct KakaoTalkTranscriptReader {
             }
 
             for staticText in staticTexts {
-                if rowHelpDate == nil, let help = staticText.helpText, let parsed = Self.parseHelpDate(help) {
+                let (rawValue, help) = staticText.valueAndHelp()
+                if rowHelpDate == nil, let help, let parsed = Self.parseHelpDate(help) {
                     rowHelpDate = parsed
                 }
-                let normalized = normalizeBodyText(staticText.stringValue)
+                let normalized = normalizeBodyText(rawValue)
                 guard !normalized.isEmpty else { continue }
                 metadataTokensBuffer.append(contentsOf: metadataTokens(from: normalized))
                 urlTokenCount += countURLTokens(in: normalized)

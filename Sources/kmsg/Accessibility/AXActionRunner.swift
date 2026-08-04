@@ -9,8 +9,12 @@ struct AXActionRunner {
 
     init(traceEnabled: Bool) {
         self.traceEnabled = traceEnabled
+        // Monotonic elapsed time since runner creation so trace lines double as
+        // a lightweight profile of where a command spends its wall clock.
+        let start = DispatchTime.now()
         self.traceWriter = { message in
-            guard let data = "[trace-ax] \(message)\n".data(using: .utf8) else { return }
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
+            guard let data = String(format: "[trace-ax] [+%8.3fs] %@\n", elapsed, message).data(using: .utf8) else { return }
             FileHandle.standardError.write(data)
         }
     }

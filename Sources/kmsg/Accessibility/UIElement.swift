@@ -161,10 +161,18 @@ public final class UIElement: @unchecked Sendable {
     }
 
     public var frame: CGRect? {
-        guard let pos = position, let size = size else {
+        let values = batchAttributes([kAXPositionAttribute, kAXSizeAttribute])
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        guard
+            let positionRef = values[0], CFGetTypeID(positionRef as CFTypeRef) == AXValueGetTypeID(),
+            AXValueGetValue(positionRef as! AXValue, .cgPoint, &point),
+            let sizeRef = values[1], CFGetTypeID(sizeRef as CFTypeRef) == AXValueGetTypeID(),
+            AXValueGetValue(sizeRef as! AXValue, .cgSize, &size)
+        else {
             return nil
         }
-        return CGRect(origin: pos, size: size)
+        return CGRect(origin: point, size: size)
     }
 
     public func setPosition(_ point: CGPoint) throws {
@@ -186,6 +194,55 @@ public final class UIElement: @unchecked Sendable {
     public func setFrame(_ frame: CGRect) throws {
         try setPosition(frame.origin)
         try setSize(frame.size)
+    }
+
+    // MARK: - Batched Attributes
+
+    /// Fetch several attributes in a single AX IPC round-trip. Each slot in
+    /// the result aligns with `names`; attributes the element does not provide
+    /// come back as nil. Every AXUIElementCopyAttributeValue call is a
+    /// synchronous message to the target app (measured 2-10ms against
+    /// KakaoTalk transcripts), so batching is the difference between a
+    /// sub-second and a 20-second tree walk.
+    public func batchAttributes(_ names: [String]) -> [Any?] {
+        var values: CFArray?
+        let error = AXUIElementCopyMultipleAttributeValues(
+            axElement,
+            names as CFArray,
+            AXCopyMultipleAttributeOptions(),
+            &values
+        )
+        guard error == .success, let raw = values as? [AnyObject], raw.count == names.count else {
+            return [Any?](repeating: nil, count: names.count)
+        }
+        return raw.map { value -> Any? in
+            if CFGetTypeID(value) == AXValueGetTypeID() {
+                let axValue = unsafeDowncast(value, to: AXValue.self)
+                if AXValueGetType(axValue) == .axError {
+                    return nil
+                }
+            }
+            if value is NSNull {
+                return nil
+            }
+            return value
+        }
+    }
+
+    /// Role and children in one round-trip — the two attributes every
+    /// breadth-first traversal needs at each visited node.
+    public func roleAndChildren() -> (role: String?, children: [UIElement]) {
+        let values = batchAttributes([kAXRoleAttribute, kAXChildrenAttribute])
+        let role = values[0] as? String
+        let children = (values[1] as? [AXUIElement])?.map { UIElement($0) } ?? []
+        return (role, children)
+    }
+
+    /// AXValue and AXHelp in one round-trip. Transcript row analysis reads
+    /// both from every static text (body/metadata plus the date tooltip).
+    public func valueAndHelp() -> (value: String?, help: String?) {
+        let values = batchAttributes([kAXValueAttribute, kAXHelpAttribute])
+        return (values[0] as? String, values[1] as? String)
     }
 
     // MARK: - Hierarchy
@@ -354,7 +411,8 @@ public final class UIElement: @unchecked Sendable {
             index += 1
             visited += 1
 
-            if let role = current.role, roles.contains(role) {
+            let (currentRole, children) = current.roleAndChildren()
+            if let role = currentRole, roles.contains(role) {
                 let limit = roleLimits[role] ?? .max
                 if results[role]!.count < limit {
                     results[role]!.append(current)
@@ -365,7 +423,7 @@ public final class UIElement: @unchecked Sendable {
             }
 
             if saturated < totalRoles && visited < maxNodes {
-                queue.append(contentsOf: current.children)
+                queue.append(contentsOf: children)
             }
         }
 
@@ -377,9 +435,28 @@ public final class UIElement: @unchecked Sendable {
         findAll { $0.role == role }
     }
 
-    /// Find elements by role with limit
+    /// Find elements by role with limit (batched: one IPC round-trip per node)
     public func findAll(role: String, limit: Int, maxNodes: Int? = nil) -> [UIElement] {
-        findAll(where: { $0.role == role }, limit: limit, maxNodes: maxNodes)
+        var results: [UIElement] = []
+        var queue = children
+        var index = 0
+        var visited = 0
+        let nodeBudget = maxNodes ?? .max
+
+        while index < queue.count && results.count < limit && visited < nodeBudget {
+            let current = queue[index]
+            index += 1
+            visited += 1
+            let (currentRole, currentChildren) = current.roleAndChildren()
+            if currentRole == role {
+                results.append(current)
+                if results.count >= limit { break }
+            }
+            if visited >= nodeBudget { break }
+            queue.append(contentsOf: currentChildren)
+        }
+
+        return results
     }
 
     /// Find element by identifier
