@@ -667,6 +667,20 @@ struct KakaoContactAutomation {
             }
         }
         guard let chatWindow else {
+            // Blind-debuggable failure dump: the bridge Mac has no remote
+            // screen, so record what windows actually existed — a window
+            // holding the chat under a DIFFERENT title (e.g. a residue contact
+            // saved under a corrupted name) is indistinguishable from "no
+            // window opened" without this.
+            for window in kakao.windows {
+                let isNew = !windowsBeforeChatStart.contains { sameElement($0, window) }
+                let composer = hasChatComposer(in: window, stillShowsChatStartAction: false)
+                runner.log(
+                    "1:1 chat failure window: title='\(window.title ?? "")' new=\(isNew) " +
+                        "main=\(sameElement(window, mainListWindow)) composer=\(composer)"
+                )
+            }
+            runner.log("1:1 chat failure focused: '\(kakao.focusedWindow?.title ?? "")'")
             throw KakaoTalkError.windowNotFound(
                 "[\(ContactAutomationFailureCode.chatWindowNotReady.rawValue)] 1:1 chat for '\(friendName)' did not expose a message input"
             )
