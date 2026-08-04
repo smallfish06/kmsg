@@ -385,7 +385,55 @@ struct KakaoContactAutomation {
         }
 
         try setVerbatimText(name, on: nameInput, label: "contact name input", comparison: .exact)
-        try setVerbatimText(phone, on: phoneInput, label: "contact phone input", comparison: .digitsOnly)
+        try setVerbatimText(phone, on: phoneInput, label: "contact phone input", comparison: .digitsOnly, focus: .tabFromPrevious)
+
+        // Typing into one field can leak into the other: keystrokes route by
+        // the app's real key focus, which can lag the AXFocused report, so the
+        // phone digits have been observed landing in the already-verified name
+        // field (saving the contact under a corrupted name and breaking the
+        // 1:1 chat title match → CHAT_WINDOW_NOT_READY). Re-verify BOTH fields
+        // together and repair the contaminated one until a pass leaves both
+        // correct at the same time.
+        for pass in 1...3 {
+            let nameOK = verbatimMatches(name, on: nameInput, comparison: .exact)
+            let phoneOK = verbatimMatches(phone, on: phoneInput, comparison: .digitsOnly)
+            if nameOK && phoneOK {
+                if pass > 1 { runner.log("contact fields cross-check: repaired on pass \(pass)") }
+                return
+            }
+            runner.log(
+                "contact fields cross-check pass \(pass): name_ok=\(nameOK) phone_ok=\(phoneOK) " +
+                    "name='\(nameInput.stringValue ?? "")' phone='\(phoneInput.stringValue ?? "")'"
+            )
+            if !nameOK {
+                try setVerbatimText(name, on: nameInput, label: "contact name input (repair)", comparison: .exact)
+            }
+            if !phoneOK {
+                try setVerbatimText(phone, on: phoneInput, label: "contact phone input (repair)", comparison: .digitsOnly)
+            }
+        }
+        guard verbatimMatches(name, on: nameInput, comparison: .exact),
+              verbatimMatches(phone, on: phoneInput, comparison: .digitsOnly)
+        else {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.inputNotReflected.rawValue)] Contact name/phone fields did not hold their values together"
+            )
+        }
+    }
+
+    private func verbatimMatches(
+        _ text: String,
+        on input: UIElement,
+        comparison: VerbatimComparison
+    ) -> Bool {
+        guard let current = input.stringValue else { return false }
+        let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch comparison {
+        case .exact:
+            return trimmed == text
+        case .digitsOnly:
+            return trimmed.filter(\.isNumber) == text.filter(\.isNumber)
+        }
     }
 
     private enum VerbatimComparison {
@@ -402,11 +450,23 @@ struct KakaoContactAutomation {
     // to preserve, so demand the full string: settle focus before the first
     // key, verify the exact readback, and clear + retype (AXValue as a last
     // resort) until it matches.
+    private enum FieldFocusStrategy {
+        // AX focus + press fallback (the popover accepts the AXFocused write,
+        // but real key routing can lag — safe for the default-focused field).
+        case ax
+        // Press Tab from the previously verified field: moves REAL key focus
+        // the way a user would, immune to the AXFocused/key-routing decouple.
+        // A frame-center mouse click is not an option — it dismisses the
+        // popover (observed live).
+        case tabFromPrevious
+    }
+
     private func setVerbatimText(
         _ text: String,
         on input: UIElement,
         label: String,
-        comparison: VerbatimComparison
+        comparison: VerbatimComparison,
+        focus: FieldFocusStrategy = .ax
     ) throws {
         func matches(_ current: String?) -> Bool {
             guard let current else { return false }
@@ -420,7 +480,15 @@ struct KakaoContactAutomation {
         }
 
         for attempt in 1...3 {
-            guard runner.focusWithVerification(input, label: label, attempts: 2) else {
+            if focus == .tabFromPrevious && attempt == 1 {
+                runner.log("\(label): moving key focus via Tab")
+                runner.pressTabKey()
+                Thread.sleep(forTimeInterval: 0.15)
+                // Best-effort AX confirmation only — AXFocused is decoupled
+                // from real key routing here; the verbatim readback below is
+                // the authoritative gate.
+                _ = runner.focusWithVerification(input, label: label, attempts: 1)
+            } else if !runner.focusWithVerification(input, label: label, attempts: 2) {
                 throw KakaoTalkError.actionFailed(
                     "[\(ContactAutomationFailureCode.inputNotReflected.rawValue)] Could not focus \(label)"
                 )
