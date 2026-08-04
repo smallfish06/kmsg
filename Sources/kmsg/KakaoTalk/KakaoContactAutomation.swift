@@ -1135,8 +1135,24 @@ struct KakaoContactAutomation {
                 (normalizedTitle == normalizedFriendName || normalizedTitle.contains(normalizedFriendName) ||
                     normalizedFriendName.contains(normalizedTitle))
             let strongTitleMatch = !normalizedFriendName.isEmpty && normalizedTitle == normalizedFriendName
-            let openedByThisClick = (isNewWindow || focusChanged) && titleMatches
+            // Kakao opens the 1:1 chat under the friend's EXISTING profile
+            // name whenever the number already maps to a known friend (or a
+            // residue contact left by an earlier failed add), so the freshly
+            // typed contact name may never appear as any window title
+            // (observed live: expected '나(5501)', got '석천'). A window that
+            // is both new and focus-stealing right after our click is causally
+            // ours — accept it despite the title and let the REAL title flow
+            // into the binding; confirmChatIdentity still verifies before the
+            // result is trusted.
+            let clickCaused = isNewWindow && focusChanged
+            let openedByThisClick = ((isNewWindow || focusChanged) && titleMatches) || clickCaused
             guard openedByThisClick else { return nil }
+            if !titleMatches {
+                runner.log(
+                    "friend chat candidate accepted with different title: '\(window.title ?? "")' " +
+                        "(expected '\(friendName)')"
+                )
+            }
 
             // Names are not a reliable discriminator: Kakao decorates the
             // Friend result but may shorten the chat title. Prefer a bounded
