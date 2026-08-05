@@ -98,11 +98,32 @@ class FriendOpenProfileCommandContractTests(unittest.TestCase):
         self.assertIn("role == kAXTextAreaRole || isMessageLabeled || customComposer", source)
         self.assertIn("friend composer candidates rejected:", source)
         self.assertIn("friend chat candidate title=", source)
-        self.assertIn("let openedByThisClick = (isNewWindow || focusChanged) && titleMatches", source)
+        self.assertIn(
+            "let openedByThisClick = ((isNewWindow || focusChanged) && titleMatches) || clickCaused",
+            source,
+        )
         self.assertIn("guard let chatTitle = usableChatTitle(chatWindow.title)", source)
         self.assertIn("retrying refreshed 1:1 chat action", source)
         self.assertIn("if openedChatWindow == nil", source)
         self.assertIn('tryRaiseWindow(openedChatWindow, label: "opened friend chat")', source)
+
+    def test_friend_add_accepts_the_click_caused_chat_window_despite_a_title_mismatch(self) -> None:
+        """번호가 이미 아는 친구(또는 이전 실패가 남긴 잔해 연락처)에 매핑되면 카톡은
+        방금 입력한 이름이 아니라 기존 프로필 이름으로 1:1 창을 연다 (실측: expected
+        '나(5501)' → got '석천'). 제목 매칭만 믿으면 눈앞의 올바른 창을 거부해
+        CHAT_WINDOW_NOT_READY 로 죽는다 (171450d)."""
+        source = CONTACT_AUTOMATION.read_text(encoding="utf-8")
+
+        # 클릭 직후 "새로 열렸고 + 포커스를 가져간" 창은 인과적으로 우리 것이다.
+        self.assertIn("let clickCaused = isNewWindow && focusChanged", source)
+        self.assertIn(
+            "let openedByThisClick = ((isNewWindow || focusChanged) && titleMatches) || clickCaused",
+            source,
+        )
+        # 제목이 달라도 수용하되, 왜 수용했는지는 로그에 남아야 한다.
+        self.assertIn("friend chat candidate accepted with different title:", source)
+        # 수용은 최종 신뢰가 아니다 — 실제 제목이 바인딩으로 흐르고 신원 확인이 따로 선다.
+        self.assertIn("private func confirmChatIdentity", source)
 
     def test_friend_add_sends_optional_first_message_through_the_exact_opened_window(self) -> None:
         command = FRIEND_COMMAND.read_text(encoding="utf-8")
