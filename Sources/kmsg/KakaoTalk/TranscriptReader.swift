@@ -798,6 +798,7 @@ struct KakaoTalkTranscriptReader {
             if isLikelyCountToken(token)
                 || isLikelySystemMetadataToken(token)
                 || isLikelyAttachmentMetadataToken(token)
+                || isLikelyBubbleStatusToken(token)
             {
                 continue
             }
@@ -866,6 +867,35 @@ struct KakaoTalkTranscriptReader {
 
         return false
     }
+
+    /// Status labels KakaoTalk draws on the bubble itself, not sender names.
+    ///
+    /// They surface as their own `AXStaticText` inside the row, so on a bubble
+    /// that carries no name label of its own — every message after the first in
+    /// a run by the same person — the label becomes the first metadata token and
+    /// is taken as the author. A peer editing one message made `read`/`watch`
+    /// report `"author":"수정됨"`, and a consumer that trusts author as the
+    /// freshly-read peer name overwrote a stored chat title with it (talkfriend,
+    /// 2026-08-06). Dropping the token leaves the author empty so the left-anchor
+    /// chain supplies the real name — which is correct, since a bubble without a
+    /// name label belongs to whoever owns the run.
+    private func isLikelyBubbleStatusToken(_ token: String) -> Bool {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        return Self.bubbleStatusLabels.contains(trimmed.lowercased())
+    }
+
+    private static let bubbleStatusLabels: Set<String> = [
+        "수정됨",
+        "삭제된 메시지",
+        "삭제된 메시지입니다",
+        "안읽음",
+        "읽지 않음",
+        "edited",
+        "deleted message",
+        "unread"
+    ]
 
     private func isLikelyAttachmentMetadataToken(_ token: String) -> Bool {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
