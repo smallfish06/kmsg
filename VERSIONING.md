@@ -93,3 +93,34 @@ The script is vendored from the
 - Build-time version generation validates the `MAJOR.YYMMDD.PATCH_COUNT` format directly from `VERSION`.
 - Release automation resolves the Git tag from `VERSION` as `v{VERSION}`.
 - Release automation validates the tag format before building and checks the built binary's `--version` against the tag.
+
+## Releasing
+
+`make release-push` bumps `VERSION`, commits, tags, and pushes — but pushing the
+tag is **not** enough to publish. This repository has never run a workflow from a
+push event: every run in its history was a `workflow_dispatch`, including the ones
+that look like tag releases. `release.yml` does declare `on: push: tags: ['v*']`,
+and both workflows report `state=active`, so the block is not in the workflow
+files; it sits at the repository level (this is a fork — see the Actions tab for a
+"workflows aren't being run on this forked repository" opt-in).
+
+So after tagging, start the release by hand:
+
+```bash
+gh workflow run release.yml --repo smallfish06/kmsg --ref main -f tag=v<version>
+```
+
+Then confirm the asset actually exists before pinning the version anywhere — the
+consumer's updater downloads `kmsg-macos-universal` from the release and will
+fail in a loop if the tag has no asset:
+
+```bash
+gh release view v<version> --repo smallfish06/kmsg --json assets
+```
+
+The same repository-level block is why `ci.yml` never runs on pushes or pull
+requests. Until it is lifted, run its checks locally before pushing:
+
+```bash
+swift build && swift build -c release && python3 -m unittest discover tests
+```
