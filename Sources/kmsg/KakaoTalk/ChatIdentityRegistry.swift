@@ -46,8 +46,15 @@ final class ChatIdentityRegistryStore: @unchecked Sendable {
         let now = Date()
         var assignedIDs = Array(repeating: "", count: discoveries.count)
 
+        // 신원 그룹 키는 lenient 정규화를 쓴다. strict `normalize` 는 구두점·기호를
+        // 전부 걷어내므로 "~.~" 나 "-.--..-..--..-" 같은 이름이 통째로 빈 문자열이
+        // 되고, 그러면 서로 다른 사람들이 한 그룹에 묶여 같은 chat id 를 나눠 갖는다
+        // (sha256("") = e3b0c44298fc…). 실제로 두 사용자의 방이 하나로 합쳐져
+        // 수신이 남의 대화로 라우팅되고 답장에 남의 대화 맥락이 실려 나갔다
+        // (2026-08-06). normalizeForMatch 는 strict 결과가 비면 기호를 남기는
+        // 형태로 떨어져 이런 이름들도 서로 다른 non-empty 키가 된다.
         let groupedCurrent = Dictionary(grouping: discoveries.indices) { index in
-            ChatTextNormalizer.normalize(discoveries[index].title)
+            ChatTextNormalizer.normalizeForMatch(discoveries[index].title)
         }
         let groupedExisting = Dictionary(grouping: records.indices) { index in
             records[index].normalizedName
@@ -177,11 +184,22 @@ final class ChatIdentityRegistryStore: @unchecked Sendable {
 
         do {
             let data = try Data(contentsOf: fileURL)
-            let document = try decoder.decode(ChatIdentityRegistryDocument.self, from: data)
+            var document = try decoder.decode(ChatIdentityRegistryDocument.self, from: data)
             guard document.schemaVersion == Self.schemaVersion else {
                 let reset = emptyDocument()
                 cachedDocument = reset
                 return reset
+            }
+            // 저장된 normalizedName 을 현재 규칙으로 다시 계산한다. strict 정규화로
+            // 적힌 옛 레코드가 그대로 남으면 lenient 로 묶인 현재 그룹과 만나지 못해
+            // 멀쩡한 방들이 전부 새 chat id 를 받는다 — schemaVersion 을 올려
+            // 레지스트리를 통째로 버리는 것과 같은 결과다. 여기서 제자리 치유하면
+            // 이름이 정상인 방(대다수)은 strict 결과가 그대로라 id 가 유지되고,
+            // 빈 문자열로 뭉쳐 있던 기호 이름들만 서로 다른 그룹으로 갈라진다.
+            document.records = document.records.map { record in
+                var healed = record
+                healed.normalizedName = ChatTextNormalizer.normalizeForMatch(record.displayName)
+                return healed
             }
             cachedDocument = document
             return document
