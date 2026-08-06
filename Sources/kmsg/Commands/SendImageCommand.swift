@@ -34,6 +34,17 @@ struct SendImageCommand: ParsableCommand {
     @Flag(name: .long, help: "Enable deep window recovery when fast window detection fails")
     var deepRecovery: Bool = false
 
+    // SendCommand 와 같은 검증. 사진은 지우기가 더 어렵기도 하다.
+    @Option(
+        name: .customLong("expect-anchor"),
+        parsing: .singleValue,
+        help: "Recent message text that must appear in the chat before sending. Repeatable."
+    )
+    var expectAnchors: [String] = []
+
+    @Option(name: .customLong("expect-min"), help: "How many --expect-anchor values must match (default 1)")
+    var expectMin: Int = 1
+
     var recipient: String? {
         guard chatID == nil else { return nil }
         return firstValue
@@ -121,6 +132,14 @@ struct SendImageCommand: ParsableCommand {
                     runner: runner
                 )
             }
+            // 클립보드에 손대기 전에 확인한다. 붙여넣은 뒤 실패하면 그 첨부가 per-chat
+            // 초안으로 남아 다음 창 열기에서 흘러나간다(2026-08-04 중복 사진 사고).
+            try ChatIdentityVerifier(kakao: kakao, runner: runner).verify(
+                window: resolution.window,
+                fallbackChatTitle: recipient ?? chatID ?? "",
+                anchors: expectAnchors,
+                minimumMatches: expectMin
+            )
             try sendImageToWindow(imageURL, window: resolution.window, kakao: kakao, runner: runner)
         } catch {
             print("Failed to send image: \(error)")

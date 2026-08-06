@@ -37,6 +37,20 @@ struct SendCommand: ParsableCommand {
     @Flag(name: [.short, .long], help: "Keep chat and list windows open after sending message")
     var keepWindow: Bool = false
 
+    // 주소(chat id / 이름)로는 방이 맞는지 증명할 수 없다 — id 는 표시이름 해시라
+    // 재배치되고, 이름 검색은 기호뿐인 이름에서 동작하지 않는다. 증명할 수 있는 건 그
+    // 방의 대화 내용뿐이라, 호출자가 최근 메시지를 앵커로 넘기면 타이핑 전에 대조한다.
+    // 하나도 안 넘기면 검증하지 않는다(기존 호출자의 동작은 그대로다).
+    @Option(
+        name: .customLong("expect-anchor"),
+        parsing: .singleValue,
+        help: "Recent message text that must appear in the chat before typing. Repeatable."
+    )
+    var expectAnchors: [String] = []
+
+    @Option(name: .customLong("expect-min"), help: "How many --expect-anchor values must match (default 1)")
+    var expectMin: Int = 1
+
     @Flag(
         name: .long,
         help: ArgumentHelp(
@@ -158,6 +172,14 @@ struct SendCommand: ParsableCommand {
                     runner: runner
                 )
             }
+            // 타이핑 전에 이 창이 정말 그 방인지 확인한다. 창을 다시 해석하지 않고
+            // 방금 잡은 핸들 그대로 읽으므로, 확인과 타이핑 사이에 방이 바뀔 틈이 없다.
+            try ChatIdentityVerifier(kakao: kakao, runner: runner).verify(
+                window: resolution.window,
+                fallbackChatTitle: recipient ?? chatID ?? "",
+                anchors: expectAnchors,
+                minimumMatches: expectMin
+            )
             try sendMessageToWindow(resolution.window, kakao: kakao, runner: runner)
         } catch {
             print("Failed to send message: \(error)")
