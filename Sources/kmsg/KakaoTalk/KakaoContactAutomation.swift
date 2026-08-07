@@ -243,14 +243,29 @@ struct KakaoContactAutomation {
     }
 
     private func navigateToFriends(in rootWindow: UIElement) throws {
+        // ⌘1 first. The sidebar tab is a custom control that reports AXPress
+        // success WITHOUT switching tabs (measured 2026-08-08: the switch only
+        // happened when a later mis-aimed click hit the sidebar by accident),
+        // and readiness below demands the friends-only toolbar button, so a
+        // silent non-switch is caught here instead of surfacing as a popover
+        // timeout two steps later. The global shortcut cannot mis-aim.
+        kakao.activate()
+        runner.pressCommandOne()
+        if runner.waitUntil(label: "friends tab content", timeout: 2.5, pollInterval: 0.05, condition: { [self] in
+            findFriendAddButton(in: rootWindow) != nil
+        }) {
+            return
+        }
+        // Fallback for a KakaoTalk build where ⌘1 is unbound: real mouse click
+        // on the sidebar tab (AXPress is a no-op there, see above).
+        runner.log("friends tab: ⌘1 did not surface the friend add button; falling back to a sidebar click")
         if let friendsButton = rootWindow.findFirst(identifier: "friends") ?? findButton(in: rootWindow, matching: ["친구", "friends"]) {
-            guard activate(friendsButton, label: "friends tab") else {
+            if let frame = stableFrame(of: friendsButton) {
+                runner.mouseClick(at: CGPoint(x: frame.midX, y: frame.midY), label: "friends tab")
+            } else if !activate(friendsButton, label: "friends tab") {
                 throw KakaoTalkError.actionFailed("[\(ContactAutomationFailureCode.friendsTabNotFound.rawValue)] Could not activate Friends tab")
             }
-            // The navigation button exists on every tab, so checking for it
-            // returns immediately and races the actual content transition.
-            // Wait for a Friends-only control before resolving/clicking it.
-            let ready = runner.waitUntil(label: "friends tab content", timeout: 1.2, pollInterval: 0.05) {
+            let ready = runner.waitUntil(label: "friends tab content (fallback)", timeout: 2.5, pollInterval: 0.05) {
                 findFriendAddButton(in: rootWindow) != nil
             }
             guard ready else {
@@ -275,7 +290,7 @@ struct KakaoContactAutomation {
         for _ in 0..<3 {
             guard let addButton = findFriendAddButton(in: rootWindow) else { continue }
             foundButton = true
-            if let frame = addButton.frame {
+            if let frame = stableFrame(of: addButton) {
                 runner.mouseClick(at: CGPoint(x: frame.midX, y: frame.midY), label: "friend add button")
             } else {
                 _ = activate(addButton, label: "friend add button")
@@ -290,7 +305,61 @@ struct KakaoContactAutomation {
     }
 
     private func findFriendAddButton(in root: UIElement) -> UIElement? {
-        findButton(in: root, matching: ["친구 추가", "친구추가", "add friend", "add friends"])
+        let patterns = ["친구 추가", "친구추가", "add friend", "add friends"]
+        // Early-exit exact probe first: findAll walks its whole node budget
+        // (~3s on a loaded window) even after a hit, which made every
+        // readiness poll a multi-second stall. The toolbar button sits shallow
+        // and BFS stops at the first match, so the present-case costs
+        // milliseconds; only the absent-case pays a bounded walk.
+        if let direct = root.findFirst(maxDepth: 8, where: { [self] element in
+            guard element.isEnabled, (element.role ?? "") == kAXButtonRole else { return false }
+            let text = elementText(element).lowercased()
+            return patterns.contains { text.contains($0) }
+        }) {
+            return direct
+        }
+        let buttons = root.findAll(where: { element in
+            guard element.isEnabled else { return false }
+            let role = element.role ?? ""
+            return role == kAXButtonRole || role == "AXMenuButton" || role == "AXPopUpButton"
+        }, limit: 48, maxNodes: 1_200)
+        // Exact-match scores only (≥1000): the loose contains-"친구" tier (100)
+        // matches the sidebar Friends tab, which (a) satisfied the tab-content
+        // readiness poll before the toolbar button had rendered and (b) got
+        // clicked as a no-op, costing a popover timeout + a slow re-resolve
+        // (~15s of every friend add, measured 2026-08-08 locally and on the
+        // bridge Mac). No exact match means "keep waiting", not "click the
+        // closest thing".
+        let scored = buttons
+            .map { (button: $0, score: scoreElement($0, matching: patterns)) }
+            .filter { $0.score >= 1_000 }
+            .sorted { $0.score > $1.score }
+        for candidate in scored.prefix(3) {
+            let frame = candidate.button.frame.map { "(\(Int($0.midX)),\(Int($0.midY)))" } ?? "(?)"
+            runner.log(
+                "friend add button candidate: score=\(candidate.score) at=\(frame) role=\(candidate.button.role ?? "?") desc='\(elementText(candidate.button).prefix(40))'"
+            )
+        }
+        return scored.first?.button
+    }
+
+    // A frame read mid window-move/animation aims the click at where the
+    // button WAS — the first friend-add click landed 330px off and cost a
+    // popover timeout plus a slow re-resolve (measured 2026-08-08). Two equal
+    // consecutive reads mean the window has settled; bail to the last read
+    // after a few tries so a jittery tree still gets a best-effort click.
+    private func stableFrame(of element: UIElement) -> CGRect? {
+        var last = element.frame
+        for _ in 0..<4 {
+            guard let previous = last else { return nil }
+            Thread.sleep(forTimeInterval: 0.08)
+            let current = element.frame
+            if let current, current.equalTo(previous) {
+                return current
+            }
+            last = current
+        }
+        return last
     }
 
     private func selectKakaoIDMode(in root: UIElement) throws {
@@ -530,18 +599,30 @@ struct KakaoContactAutomation {
     // Friend-add UI is an AXPopover inside the main window, not a separate
     // window — waitForNewRoot never sees it. Poll for it so we can scope input/
     // button lookups to the popover instead of the whole window.
+    //
+    // The polling search is depth-bounded: the popover hangs shallow off the
+    // window, while a full-tree miss costs ~3s of AX walks on a loaded main
+    // window — which silently stretched this 1s wait to ~7s and the whole
+    // dialog phase to 15s (measured 2026-08-08). One full-depth pass at the
+    // end keeps a deeply-nested popover from becoming a hard failure.
     private func waitForPopover(in root: UIElement) -> UIElement? {
         var popover: UIElement?
         _ = runner.waitUntil(label: "friend add popover", timeout: 1.0, pollInterval: 0.05) {
-            popover = findPopover(in: root) ?? kakao.mainWindow.flatMap { findPopover(in: $0) }
+            popover = findPopover(in: root, maxDepth: 8) ?? kakao.mainWindow.flatMap { findPopover(in: $0, maxDepth: 8) }
             return popover != nil
+        }
+        if popover == nil {
+            popover = findPopover(in: root, maxDepth: Int.max)
         }
         return popover
     }
 
-    private func findPopover(in root: UIElement) -> UIElement? {
+    private func findPopover(in root: UIElement, maxDepth: Int = Int.max) -> UIElement? {
         if root.role == "AXPopover" { return root }
-        return root.findFirst { $0.role == "AXPopover" }
+        if maxDepth == Int.max {
+            return root.findFirst { $0.role == "AXPopover" }
+        }
+        return root.findFirst(maxDepth: maxDepth) { $0.role == "AXPopover" }
     }
 
     private func triggerSearch(in root: UIElement, input: UIElement) throws {

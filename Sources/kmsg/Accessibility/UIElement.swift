@@ -391,6 +391,29 @@ public final class UIElement: @unchecked Sendable {
         return nil
     }
 
+    /// BFS bounded to `maxDepth` levels below this element. A full-tree
+    /// negative search on a loaded main window costs seconds of AX round-trips
+    /// (measured ~3s with 100+ chat rows), which turns every polling wait that
+    /// uses it into a multi-second stall; shallow chrome (popovers, toolbars)
+    /// never needs the deep walk.
+    public func findFirst(maxDepth: Int, where predicate: (UIElement) -> Bool) -> UIElement? {
+        var queue: [(element: UIElement, depth: Int)] = children.map { ($0, 1) }
+        var index = 0
+
+        while index < queue.count {
+            let (current, depth) = queue[index]
+            index += 1
+            if predicate(current) {
+                return current
+            }
+            if depth < maxDepth {
+                queue.append(contentsOf: current.children.map { ($0, depth + 1) })
+            }
+        }
+
+        return nil
+    }
+
     /// Find elements matching any of the given roles in a single BFS pass
     public func findAll(
         roles: Set<String>,
