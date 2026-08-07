@@ -130,7 +130,14 @@ struct SendCommand: ParsableCommand {
         // in the killer's captured stderr) + one summary line on every exit.
         let profiler = PhaseProfiler(command: "send")
         var runFailed = true
-        defer { profiler.emitSummary(status: runFailed ? "fail" : "ok") }
+        defer {
+            // Same contract as ReadCommand: any failure invalidates the auth
+            // verification cache so the next command re-checks for real.
+            if runFailed {
+                AuthVerificationCache.invalidate()
+            }
+            profiler.emitSummary(status: runFailed ? "fail" : "ok")
+        }
 
         prepareCacheIfNeeded(runner: runner)
         profiler.begin("auth")

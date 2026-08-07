@@ -221,6 +221,12 @@ public final class KakaoTalkApp: Sendable {
         app.focusedWindow
     }
 
+    /// Cheap single-probe presence check (no polling, no reopen) — the gate
+    /// the auth verification cache pairs with before skipping the full check.
+    public var hasUsableWindow: Bool {
+        currentUsableWindow() != nil
+    }
+
     private func currentUsableWindow() -> UIElement? {
         focusedWindow ?? mainWindow ?? windows.first
     }

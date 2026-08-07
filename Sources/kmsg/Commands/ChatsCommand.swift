@@ -58,6 +58,7 @@ struct ChatsCommand: ParsableCommand {
             runner.log("chats: fallback to ensureMainWindow")
         } else {
             print("Could not find a usable KakaoTalk window.")
+            AuthVerificationCache.invalidate()
             throw ExitCode.failure
         }
 

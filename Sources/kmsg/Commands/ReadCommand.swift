@@ -108,7 +108,15 @@ struct ReadCommand: ParsableCommand {
         // gets here — attribution then falls to the per-phase start marks.
         let profiler = PhaseProfiler(command: "read")
         var runFailed = true
-        defer { profiler.emitSummary(status: runFailed ? "fail" : "ok") }
+        defer {
+            // A failed run is the auth cache's only correction signal: drop it
+            // so the next command pays for a full check instead of trusting a
+            // possibly-stale "logged in" verdict.
+            if runFailed {
+                AuthVerificationCache.invalidate()
+            }
+            profiler.emitSummary(status: runFailed ? "fail" : "ok")
+        }
 
         guard AccessibilityPermission.ensureGranted() else {
             AccessibilityPermission.printInstructions()
