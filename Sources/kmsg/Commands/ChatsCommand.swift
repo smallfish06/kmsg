@@ -34,6 +34,9 @@ struct ChatsCommand: ParsableCommand {
         }
 
         let runner = AXActionRunner(traceEnabled: traceAX)
+        let profiler = PhaseProfiler(command: "chats")
+        defer { profiler.emitSummary(status: "done") }
+        profiler.begin("auth")
         let kakao = try AuthBootstrap.requireAuthenticated(traceAX: traceAX)
         let chatWindowResolver = ChatWindowResolver(kakao: kakao, runner: runner)
         let windowsBefore = kakao.windows
@@ -71,10 +74,12 @@ struct ChatsCommand: ParsableCommand {
         }
 
         runner.log("chats: usable window ready")
+        profiler.begin("scan")
         let scanner = ChatListScanner()
         var snapshots = scanner.scan(in: mainWindow, limit: limit, trace: { message in
             runner.log(message)
         })
+        defer { profiler.note("rows", String(snapshots.count)) }
 
         // The main window being on the friends tab shows up two ways: an
         // empty scan, OR — worse — a non-empty scan of friend rows whose

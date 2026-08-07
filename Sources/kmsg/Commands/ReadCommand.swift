@@ -103,12 +103,20 @@ struct ReadCommand: ParsableCommand {
     }
 
     func run() throws {
+        // Registered before the window-close defer below, so (LIFO) the summary
+        // runs after it and the close slice is included. A SIGKILLed hang never
+        // gets here — attribution then falls to the per-phase start marks.
+        let profiler = PhaseProfiler(command: "read")
+        var runFailed = true
+        defer { profiler.emitSummary(status: runFailed ? "fail" : "ok") }
+
         guard AccessibilityPermission.ensureGranted() else {
             AccessibilityPermission.printInstructions()
             throw ExitCode.failure
         }
 
         let runner = AXActionRunner(traceEnabled: traceAX)
+        profiler.begin("auth")
         let kakao = backgroundSafe
             ? try KakaoTalkApp(autoLaunch: false)
             : try AuthBootstrap.requireAuthenticated(traceAX: traceAX)
@@ -130,11 +138,11 @@ struct ReadCommand: ParsableCommand {
         do {
             if let chatID {
                 requestedChat = chatID
-                resolution = try chatWindowResolver.resolve(chatID: chatID)
+                resolution = try profiler.phase("resolve") { try chatWindowResolver.resolve(chatID: chatID) }
             } else {
                 let chat = chat ?? ""
                 requestedChat = chat
-                resolution = try chatWindowResolver.resolve(query: chat)
+                resolution = try profiler.phase("resolve") { try chatWindowResolver.resolve(query: chat) }
             }
         } catch {
             print("No chat window found for '\(requestedChat)'")
@@ -168,6 +176,8 @@ struct ReadCommand: ParsableCommand {
         }
 
         defer {
+            profiler.begin("close")
+            defer { profiler.end() }
             // --close-window also closes a PRE-EXISTING chat window after the
             // read. A chat window left open makes that chat's list row
             // unreadable ("(Unknown Chat)"), which breaks list-scan detection;
@@ -188,11 +198,14 @@ struct ReadCommand: ParsableCommand {
 
         var snapshot: TranscriptSnapshot
         do {
-            snapshot = try transcriptReader.readSnapshot(
-                from: window,
-                fallbackChatTitle: window.title ?? requestedChat,
-                limit: limit
-            )
+            snapshot = try profiler.phase("read") {
+                try transcriptReader.readSnapshot(
+                    from: window,
+                    fallbackChatTitle: window.title ?? requestedChat,
+                    limit: limit
+                )
+            }
+            profiler.note("rows", String(snapshot.count))
         } catch TranscriptReadError.transcriptContextUnavailable {
             // A missing transcript area is a real failure (wrong/blank window) —
             // in JSON mode report it as an error so callers don't mistake it for
@@ -206,6 +219,8 @@ struct ReadCommand: ParsableCommand {
             return
         } catch TranscriptReadError.noMessageRows {
             // An empty chat is a normal state; machine callers need valid JSON.
+            runFailed = false
+            profiler.note("rows", "0")
             if json {
                 print(emptyMessagesJSON(chat: requestedChat))
                 return
@@ -214,6 +229,8 @@ struct ReadCommand: ParsableCommand {
             print("Use 'kmsg inspect --window <n>' to inspect transcript structure.")
             return
         } catch TranscriptReadError.noReadableMessages {
+            runFailed = false
+            profiler.note("rows", "0")
             if json {
                 print(emptyMessagesJSON(chat: requestedChat))
                 return
@@ -225,9 +242,12 @@ struct ReadCommand: ParsableCommand {
 
         if let captureImages {
             do {
+                profiler.begin("capture")
+                defer { profiler.end() }
                 let capturer = try TranscriptImageCapturer(
                     outputDirectoryPath: captureImages,
-                    runner: runner
+                    runner: runner,
+                    profiler: profiler
                 )
                 snapshot = try capturer.captureImages(in: snapshot, from: window)
             } catch {
@@ -249,8 +269,10 @@ struct ReadCommand: ParsableCommand {
 
         if json {
             try printMessagesAsJSON(snapshot)
+            runFailed = false
             return
         }
+        runFailed = false
 
         print("Reading messages from: \(snapshot.chat)\n")
         print("Recent messages (\(snapshot.count)):\n")

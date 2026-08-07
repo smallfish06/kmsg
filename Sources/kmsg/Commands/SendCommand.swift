@@ -126,8 +126,14 @@ struct SendCommand: ParsableCommand {
         }
 
         let runner = AXActionRunner(traceEnabled: traceAX)
+        // Same contract as ReadCommand: start marks per phase (survive SIGKILL
+        // in the killer's captured stderr) + one summary line on every exit.
+        let profiler = PhaseProfiler(command: "send")
+        var runFailed = true
+        defer { profiler.emitSummary(status: runFailed ? "fail" : "ok") }
 
         prepareCacheIfNeeded(runner: runner)
+        profiler.begin("auth")
         let kakao = try AuthBootstrap.requireAuthenticated(traceAX: traceAX)
         let chatWindowResolver = ChatWindowResolver(
             kakao: kakao,
@@ -142,6 +148,7 @@ struct SendCommand: ParsableCommand {
         do {
             runner.log("window strategy: focusedWindow -> mainWindow -> windows.first")
             let resolution: ChatWindowResolution
+            profiler.begin("resolve")
             if let chatID {
                 print("Looking for chat with \(targetDescription)...")
                 resolution = try chatWindowResolver.resolve(chatID: chatID)
@@ -164,6 +171,8 @@ struct SendCommand: ParsableCommand {
             // Close on every exit path — a window left behind by a failed send
             // breaks the next read/send that has to resolve windows around it.
             defer {
+                profiler.begin("close")
+                defer { profiler.end() }
                 closeWindowsIfNeeded(
                     resolution: resolution,
                     chatListWasOpen: chatListWasOpen,
@@ -174,13 +183,18 @@ struct SendCommand: ParsableCommand {
             }
             // 타이핑 전에 이 창이 정말 그 방인지 확인한다. 창을 다시 해석하지 않고
             // 방금 잡은 핸들 그대로 읽으므로, 확인과 타이핑 사이에 방이 바뀔 틈이 없다.
-            try ChatIdentityVerifier(kakao: kakao, runner: runner).verify(
-                window: resolution.window,
-                fallbackChatTitle: recipient ?? chatID ?? "",
-                anchors: expectAnchors,
-                minimumMatches: expectMin
-            )
-            try sendMessageToWindow(resolution.window, kakao: kakao, runner: runner)
+            try profiler.phase("verify") {
+                try ChatIdentityVerifier(kakao: kakao, runner: runner).verify(
+                    window: resolution.window,
+                    fallbackChatTitle: recipient ?? chatID ?? "",
+                    anchors: expectAnchors,
+                    minimumMatches: expectMin
+                )
+            }
+            try profiler.phase("type") {
+                try sendMessageToWindow(resolution.window, kakao: kakao, runner: runner)
+            }
+            runFailed = false
         } catch {
             print("Failed to send message: \(error)")
             throw ExitCode.failure

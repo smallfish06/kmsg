@@ -61,8 +61,10 @@ struct TranscriptImageCapturer {
 
     private let outputDirectory: URL
     private let runner: AXActionRunner
+    private let profiler: PhaseProfiler?
 
-    init(outputDirectoryPath: String, runner: AXActionRunner) throws {
+    init(outputDirectoryPath: String, runner: AXActionRunner, profiler: PhaseProfiler? = nil) throws {
+        self.profiler = profiler
         let expanded = (outputDirectoryPath as NSString).expandingTildeInPath
         let absolutePath: String
         if expanded.hasPrefix("/") {
@@ -183,6 +185,7 @@ struct TranscriptImageCapturer {
             throw TranscriptImageCaptureError.kakaoProcessUnavailable
         }
 
+        profiler?.begin("cap.content")
         let content = try loadShareableContent()
         guard let matchedWindow = bestMatchingWindow(
             in: content.windows,
@@ -211,6 +214,7 @@ struct TranscriptImageCapturer {
             configuration.ignoreGlobalClipSingleWindow = true
             configuration.shouldBeOpaque = true
             configuration.captureResolution = .nominal
+            profiler?.begin("cap.shot")
             let image = try captureScreenshot(filter: filter, configuration: configuration)
             capturedSurface = CapturedSurfaceImage(
                 image: image,
@@ -219,8 +223,10 @@ struct TranscriptImageCapturer {
                 scaleFactor: nil
             )
         } else {
+            profiler?.begin("cap.stream")
             capturedSurface = try captureSingleStreamFrame(filter: filter, configuration: configuration)
         }
+        profiler?.begin("cap.encode")
 
         runner.log(
             "read: captured KakaoTalk window once (window_id=\(matchedWindow.windowID), size=\(capturedSurface.image.width)x\(capturedSurface.image.height), content=\(frameDescription(capturedSurface.contentRect)), content_scale=\(capturedSurface.contentScale.map(String.init(describing:)) ?? "unknown"), scale_factor=\(capturedSurface.scaleFactor.map(String.init(describing:)) ?? "unknown"))"
