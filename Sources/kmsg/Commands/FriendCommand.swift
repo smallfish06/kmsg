@@ -126,10 +126,23 @@ struct FriendAddCommand: ParsableCommand {
             throw ExitCode.failure
         }
 
+        // Same contract as read/send: phase start marks survive a SIGKILL in
+        // the killer's captured stderr; the summary line prints on every exit;
+        // a failed run invalidates the auth verification cache.
+        let profiler = PhaseProfiler(command: "friend_add")
+        var runFailed = true
+        defer {
+            if runFailed {
+                AuthVerificationCache.invalidate()
+            }
+            profiler.emitSummary(status: runFailed ? "fail" : "ok")
+        }
+
         let runner = AXActionRunner(traceEnabled: traceAX)
+        profiler.begin("auth")
         let kakao = try AuthBootstrap.requireAuthenticated(traceAX: traceAX)
         do {
-            let automation = KakaoContactAutomation(kakao: kakao, runner: runner)
+            let automation = KakaoContactAutomation(kakao: kakao, runner: runner, profiler: profiler)
             let result = try automation.addFriend(
                 target: target,
                 message: message?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -141,6 +154,7 @@ struct FriendAddCommand: ParsableCommand {
                 externalChatID: result.externalChatID,
                 dryRun: false
             )
+            runFailed = false
         } catch {
             if json {
                 try printError(error)

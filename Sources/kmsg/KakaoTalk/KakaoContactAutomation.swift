@@ -43,10 +43,12 @@ private enum ContactAutomationFailureCode: String {
 struct KakaoContactAutomation {
     private let kakao: KakaoTalkApp
     private let runner: AXActionRunner
+    private let profiler: PhaseProfiler?
 
-    init(kakao: KakaoTalkApp, runner: AXActionRunner) {
+    init(kakao: KakaoTalkApp, runner: AXActionRunner, profiler: PhaseProfiler? = nil) {
         self.kakao = kakao
         self.runner = runner
+        self.profiler = profiler
     }
 
     func addFriend(kakaoID: String, message: String? = nil) throws -> KakaoFriendAddResult {
@@ -68,6 +70,8 @@ struct KakaoContactAutomation {
         var openedChatWindow: UIElement?
         var keepUIForInspection = false
         defer {
+            profiler?.begin("cleanup")
+            defer { profiler?.end() }
             if keepUIForInspection {
                 // Probe asked to leave the filled popover on screen for a
                 // human to inspect/capture. Skip all cleanup.
@@ -82,8 +86,11 @@ struct KakaoContactAutomation {
             }
             }
         }
+        profiler?.begin("window")
         let rootWindow = try requireMainListWindow()
+        profiler?.begin("tab")
         try navigateToFriends(in: rootWindow)
+        profiler?.begin("dialog")
         try openFriendAddUI(from: rootWindow)
         // Friend-add happens entirely inside an AXPopover. Require it: the main
         // window's "이름으로 검색" AXSearchField must never be the target, so if
@@ -95,6 +102,7 @@ struct KakaoContactAutomation {
         let friendName: String
         switch target {
         case .kakaoID(let kakaoID):
+            profiler?.begin("input")
             try selectKakaoIDMode(in: popover)
             // Re-fetch after the mode switch swaps the popover's contents.
             let idRoot = waitForPopover(in: rootWindow) ?? popover
@@ -106,6 +114,7 @@ struct KakaoContactAutomation {
             }
             // triggerSearch blocks until a result card renders (its bottom button):
             // 친구 추가 for a new contact, 1:1 채팅 when the id is already a friend.
+            profiler?.begin("search")
             try triggerSearch(in: idRoot, input: input)
             resultRoot = waitForPopover(in: rootWindow) ?? idRoot
             friendName = resolveFriendDisplayName(in: resultRoot, fallback: kakaoID)
@@ -113,6 +122,7 @@ struct KakaoContactAutomation {
             // The popover opens on the 연락처 (name/phone) tab by default, but
             // select it explicitly so a lingering ID-tab state from a prior run
             // cannot leave the fields unreachable.
+            profiler?.begin("input")
             try selectContactMode(in: popover)
             let contactRoot = waitForPopover(in: rootWindow) ?? popover
             try fillContactFields(name: contactName, phone: phone, in: contactRoot)
@@ -127,6 +137,7 @@ struct KakaoContactAutomation {
             resultRoot = waitForPopover(in: rootWindow) ?? contactRoot
             friendName = contactName
         }
+        profiler?.begin("chat")
         let chatWindow = try openOneToOneChat(
             from: resultRoot,
             mainListWindow: rootWindow,
@@ -145,7 +156,9 @@ struct KakaoContactAutomation {
         let externalChatID: String?
 
         if let message {
+            profiler?.begin("opener")
             try sendFirstMessage(message, in: chatWindow)
+            profiler?.begin("confirm")
             externalChatID = try confirmChatIdentity(
                 chatTitle: chatTitle,
                 opener: message,
