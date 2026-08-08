@@ -66,6 +66,11 @@ final class ChatIdentityRegistryStore: @unchecked Sendable {
                 let lhsPreview = records[lhs].lastPreviewNormalized ?? ""
                 let rhsPreview = records[rhs].lastPreviewNormalized ?? ""
                 if lhsPreview == rhsPreview {
+                    // 미리보기까지 같은 레코드끼리는 최근에 매칭된 쪽이 먼저 줄을
+                    // 선다 — 아래 zip 과 같은 이유다 (유령 레코드가 이기면 안 된다).
+                    if records[lhs].lastSeenAt != records[rhs].lastSeenAt {
+                        return records[lhs].lastSeenAt > records[rhs].lastSeenAt
+                    }
                     return (records[lhs].lastSeenIndex ?? .max) < (records[rhs].lastSeenIndex ?? .max)
                 }
                 return lhsPreview < rhsPreview
@@ -83,8 +88,18 @@ final class ChatIdentityRegistryStore: @unchecked Sendable {
                 assignedIDs[currentIndex] = records[recordIndex].chatID
             }
 
+            // 최근에 매칭된 레코드가 우선이다. 한 방에 레코드가 둘 남은 상태(한 스캔이
+            // 같은 이름 행을 두 번 담으면 생긴다 — 2026-08-05 석천 재연결)에서 위치 기준
+            // zip 은 새 메시지마다 두 레코드 사이를 오가며 chat id 를 흔들었고, 흔들린
+            // id 는 서버 주소 스왑과 dedup 리셋으로 번졌다 (2026-08-08 유령 답장).
+            // 최근성 기준이면 직전 스캔의 승자가 계속 이겨 id 가 고정되고, 진 쪽은
+            // lastSeenAt 이 얼어 stale 축출로 소멸한다. 같은 스캔에 함께 보인 진짜
+            // 동명이인들은 lastSeenAt 이 같아 기존 위치 기준으로 떨어진다.
             let sortedRemainingRecords = unmatchedRecords.sorted { lhs, rhs in
-                (records[lhs].lastSeenIndex ?? .max) < (records[rhs].lastSeenIndex ?? .max)
+                if records[lhs].lastSeenAt != records[rhs].lastSeenAt {
+                    return records[lhs].lastSeenAt > records[rhs].lastSeenAt
+                }
+                return (records[lhs].lastSeenIndex ?? .max) < (records[rhs].lastSeenIndex ?? .max)
             }
             let zippedCount = min(unmatchedCurrent.count, sortedRemainingRecords.count)
             if zippedCount > 0 {
@@ -115,12 +130,22 @@ final class ChatIdentityRegistryStore: @unchecked Sendable {
             }
         }
 
+        // 오래 안 보인 레코드는 지운다. 유령 레코드(같은 방이 두 번 스캔돼 생긴 두 번째
+        // 신원)는 위의 최근성 정렬에서 계속 지면서 lastSeenAt 이 얼고, 여기서 수명이
+        // 끝난다. 스캔 지평선 밖에 오래 머문 진짜 방이 축출돼도, 돌아올 때 이름 해시가
+        // 같아 비어 있는 같은 base id 를 다시 받으므로 서버 바인딩은 다치지 않는다.
+        let staleCutoff = now.addingTimeInterval(-Self.staleRecordTTL)
+        records.removeAll { $0.lastSeenAt < staleCutoff }
         document.records = records
         document.updatedAt = now
         cachedDocument = document
         try? persist(document)
         return assignedIDs
     }
+
+    // 30일: 조용한 방이 지평선(기본 100행) 아래 머무는 기간을 넉넉히 덮으면서,
+    // 유령 신원이 다음 사고를 만들기 전에 사라질 만큼은 짧게.
+    static let staleRecordTTL: TimeInterval = 30 * 24 * 60 * 60
 
     func record(for chatID: String) -> ChatIdentityRecord? {
         let document = loadDocument()
