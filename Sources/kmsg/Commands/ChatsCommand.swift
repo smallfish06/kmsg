@@ -130,11 +130,11 @@ struct ChatsCommand: ParsableCommand {
         // "previews" are status messages that never change with new messages,
         // silently freezing inbound detection downstream. Both cases: switch
         // to the chats tab (⌘2) and rescan once.
-        if snapshots.isEmpty || scanner.looksLikeFriendsList(snapshots, trace: { runner.log($0) }) {
+        if snapshots.isEmpty || scanner.looksLikeFriendsList(snapshots, in: mainWindow, trace: { runner.log($0) }) {
             runner.log(
                 snapshots.isEmpty
                     ? "chats: empty scan — switching to the chats tab (⌘2) and rescanning"
-                    : "chats: scan looks like the FRIENDS list (no row timestamps) — switching to the chats tab (⌘2) and rescanning"
+                    : "chats: scan is not the chat list — switching to the chats tab (⌘2) and rescanning"
             )
             kakao.activate()
             runner.pressCommandTwo()
@@ -146,7 +146,7 @@ struct ChatsCommand: ParsableCommand {
             // Refuse to report friends as chats: bogus rows with frozen
             // previews are strictly worse than an empty result (callers treat
             // empty as scan-missing and fall back to direct by-name reads).
-            if scanner.looksLikeFriendsList(snapshots, trace: { runner.log($0) }) {
+            if scanner.looksLikeFriendsList(snapshots, in: retryWindow, trace: { runner.log($0) }) {
                 runner.log("chats: rescan still looks like the friends list — reporting no chats instead of friends rows")
                 snapshots = []
             }

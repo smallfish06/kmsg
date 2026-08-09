@@ -68,14 +68,38 @@ enum ChatTextNormalizer {
         return false
     }
 
-    /// Row-timestamp detector for friends-tab detection: accepts the bare
-    /// "3:12" form of isTimeLikeValue plus the chat list's rendered
-    /// "오전 3:12" / "오후 11:47" form.
+    /// Row-timestamp detector for friends-tab detection.
+    ///
+    /// This one is deliberately NARROWER than `isTimeLikeValue`. That predicate
+    /// answers "could this text be a timestamp, so don't use it as a title?" and
+    /// errs wide on purpose — it accepts anything ending in "일". Here the
+    /// question is the opposite: a single matching string is enough to declare
+    /// the list a CHAT list, so a wide predicate is a way to be fooled. A
+    /// friend's status message ending in "일" ("매일", "생일", "내일", …) anywhere
+    /// in the top rows silently certified the friends tab as the chat list, and
+    /// then every bound room looked permanently quiet because a friends row's
+    /// "preview" is a status message that never changes when messages arrive
+    /// (2026-08-09: 5분 48초 동안 수신 전면 정지, 미조 349s / 채희 369s 지연).
+    ///
+    /// Accepts exactly what the chat list renders in its timestamp cell,
+    /// measured live: "오후 11:47", "어제", "1월 10일", "2020. 1. 20.".
     static func isClockLikeValue(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if isTimeLikeValue(trimmed) { return true }
-        return trimmed.range(of: "^(오전|오후) ?[0-9]{1,2}:[0-9]{2}$", options: .regularExpression) != nil
+        if trimmed == "어제" || trimmed == "그저께" { return true }
+        for pattern in clockPatterns where trimmed.range(of: pattern, options: .regularExpression) != nil {
+            return true
+        }
+        return false
     }
+
+    private static let clockPatterns = [
+        // 오후 11:47 / 오전 3:12 / 11:47
+        "^((오전|오후) ?)?[0-9]{1,2}:[0-9]{2}$",
+        // 1월 10일 / 2026년 8월 3일
+        "^([0-9]{4}년 ?)?[0-9]{1,2}월 ?[0-9]{1,2}일$",
+        // 2020. 1. 20.
+        "^[0-9]{4}\\. ?[0-9]{1,2}\\. ?[0-9]{1,2}\\.?$",
+    ]
 
     static func isUnreadCountLike(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -216,18 +240,93 @@ struct ChatListScanner {
     /// titles (friend names), and a non-empty scan — but the "preview" is the
     /// friend's STATUS MESSAGE, which never changes with new messages
     /// (observed live: a bound chat's preview frozen for 7+ hours while
-    /// messages piled up unread). Chat rows always carry a per-row timestamp
-    /// ("오후 3:12", "어제"); friends rows never do. A non-empty list with no
-    /// timestamp anywhere is the friends tab. The verdict reads the clock
-    /// flags the scan walk already collected — no extra AX round-trips.
-    func looksLikeFriendsList(_ snapshots: [ChatListSnapshotItem], trace: ((String) -> Void)? = nil) -> Bool {
+    /// messages piled up unread). Nothing errors, so the mistake surfaces only
+    /// as silence downstream — 2026-08-09 talkfriend: 수신이 5분 48초 통째로
+    /// 멈추는 동안 `chats` 는 매 tick `status=done rows=25` 를 돌려줬다.
+    ///
+    /// Two tiers, strongest evidence first.
+    ///
+    /// 1. **The window header**, which names the tab outright. Deterministic.
+    /// 2. The row-timestamp heuristic, for windows whose header we cannot read.
+    ///    Chat rows carry a per-row timestamp ("오후 3:12", "어제"); friends rows
+    ///    never do, so a non-empty list with no timestamp is the friends tab.
+    ///    It costs no extra AX round-trips (the scan walk already collected the
+    ///    clock flags) but it is **absence-based**, and absence is exactly what
+    ///    breaks quietly in both directions: one clock-like status message
+    ///    certifies the friends tab as a chat list, and a chat list whose top
+    ///    rows are all rendered in a form we do not recognize is reported as no
+    ///    chats at all. Tier 1 exists because tier 2 cannot be made safe.
+    func looksLikeFriendsList(
+        _ snapshots: [ChatListSnapshotItem],
+        in window: UIElement? = nil,
+        trace: ((String) -> Void)? = nil
+    ) -> Bool {
         guard !snapshots.isEmpty else { return false }
+
+        // Ask the window which tab it is showing before reading tea leaves in
+        // the rows. Both directions of the row heuristic are wrong sometimes
+        // and both failures are silent, so a direct answer wins whenever there
+        // is one.
+        if let window, let tab = Self.detectMainWindowTab(in: window) {
+            if tab == .chats { return false }
+            trace?("chats: main window header says the '\(tab.rawValue)' tab is showing, not the chat list")
+            return true
+        }
+
         for snapshot in snapshots.prefix(10) where snapshot.sawClockText {
             return false
         }
         trace?("chats: no row timestamps in \(min(snapshots.count, 10)) scanned rows — friends list suspected")
         return true
     }
+
+    /// Which tab the KakaoTalk main window is showing.
+    enum MainWindowTab: String {
+        case chats
+        case friends
+        case more
+    }
+
+    /// Positive identification of the selected tab, from the window's direct
+    /// children only (~11 nodes — a rounding error next to a 25-row walk).
+    ///
+    /// The nav buttons carry no selection state: `inspect --show-attributes`
+    /// on `id: chatrooms` returns AXEnabled / AXFrame / AXHelp / AXPosition and
+    /// nothing that says whether it is the active one. What each tab DOES draw
+    /// as a direct child of the window is its own header (measured live):
+    ///
+    ///     채팅   → AXButton     title "채팅" (alongside "오픈채팅")
+    ///     친구   → AXStaticText value "친구"
+    ///     더보기 → AXStaticText value "더보기"
+    ///
+    /// Returns nil when nothing matches, and callers must read that as
+    /// "unknown", never as "wrong tab" — a KakaoTalk build that renames the
+    /// header would otherwise stop every scan, which is a far worse failure
+    /// than the one this detects. The row heuristic stays as the net there.
+    static func detectMainWindowTab(in window: UIElement) -> MainWindowTab? {
+        for child in window.children.prefix(headerScanLimit) {
+            let values = child.batchAttributes([kAXRoleAttribute, kAXTitleAttribute, kAXValueAttribute])
+            let role = values[0] as? String ?? ""
+            let title = (values[1] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = (values[2] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if role == kAXButtonRole, let title, chatsTabHeaders.contains(title) {
+                return .chats
+            }
+            if role == kAXStaticTextRole, let value {
+                if friendsTabHeaders.contains(value) { return .friends }
+                if moreTabHeaders.contains(value) { return .more }
+            }
+        }
+        return nil
+    }
+
+    /// The header sits within the window's first handful of children; the tab's
+    /// scroll area follows it. Stop before descending into that subtree.
+    private static let headerScanLimit = 16
+    private static let chatsTabHeaders: Set<String> = ["채팅", "Chats"]
+    private static let friendsTabHeaders: Set<String> = ["친구", "Friends"]
+    private static let moreTabHeaders: Set<String> = ["더보기", "More"]
 
     func warmup(in window: UIElement, trace: ((String) -> Void)? = nil) -> [AXPathSlot] {
         guard resolveChatListContainer(in: window, trace: trace) != nil else {

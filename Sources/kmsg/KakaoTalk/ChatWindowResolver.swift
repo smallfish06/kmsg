@@ -655,7 +655,7 @@ struct ChatWindowResolver {
         // then falls back to search, wasting ~10s. Mirror ChatsCommand:
         // detect the timestamp-less friends list and switch to the chats
         // tab (⌘2) once.
-        if scanner.looksLikeFriendsList(snapshots, trace: { runner.log($0) }) {
+        if scanner.looksLikeFriendsList(snapshots, in: chatListWindow, trace: { runner.log($0) }) {
             runner.log("chat_id: scan looks like the FRIENDS list — switching to the chats tab (⌘2) and rescanning")
             kakao.activate()
             runner.pressCommandTwo()

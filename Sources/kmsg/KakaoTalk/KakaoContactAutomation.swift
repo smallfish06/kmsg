@@ -916,7 +916,7 @@ struct KakaoContactAutomation {
             let listWindow = kakao.chatListWindow ?? mainListWindow
             let snapshots = scanner.scan(in: listWindow, limit: 40, trace: { runner.log($0) })
 
-            if scanner.looksLikeFriendsList(snapshots, trace: { runner.log($0) }) {
+            if scanner.looksLikeFriendsList(snapshots, in: listWindow, trace: { runner.log($0) }) {
                 runner.log("friend identity attempt \(attempt): main list still shows Friends")
                 Thread.sleep(forTimeInterval: 0.2)
                 continue
