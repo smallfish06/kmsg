@@ -146,7 +146,8 @@ struct SendCommand: ParsableCommand {
             kakao: kakao,
             runner: runner,
             useCache: !noCache,
-            deepRecoveryEnabled: deepRecovery
+            deepRecoveryEnabled: deepRecovery,
+            note: { key, value in profiler.note(key, value) }
         )
 
         // Snapshot before resolution so auto-close only touches windows this send opened.

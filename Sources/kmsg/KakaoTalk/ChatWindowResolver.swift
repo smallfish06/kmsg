@@ -47,6 +47,53 @@ private enum ChatWindowFailureCode: String {
     case inputNotReflected = "INPUT_NOT_REFLECTED"
     case windowNotReady = "WINDOW_NOT_READY"
     case searchMiss = "SEARCH_MISS"
+    case resolveBudget = "RESOLVE_BUDGET"
+}
+
+/// resolve 전체에 걸리는 시간 예산.
+///
+/// 방을 못 찾는 해석은 사다리를 끝까지 내려간다 — 제목 200행 훑기 → 레지스트리 스캔 →
+/// 이름 검색. 프로덕션 실측(2026-08-09 최희연)에서 그 한 번이 `resolve=18.53` 을 쓰고
+/// **결국 실패했다**(같은 15분 구간 p50 0.34s / p90 0.91s).
+///
+/// 비용은 시간만이 아니다. 브릿지는 계정당 단일 outbound lock 으로 발송을 직렬화하므로
+/// 한 방의 18초짜리 헛수고가 그 계정의 모든 답장을 18초 뒤로 민다. **18초 걸려 실패하는
+/// 것보다 빨리 실패하는 게 낫다** — 다음 tick 이 어차피 다시 집어간다.
+///
+/// 기본 8초는 관측된 정상 p90(0.91s)의 아홉 배이면서 위 사고의 절반보다 작다. 새로
+/// 붙인 res.list/res.search 계측으로 내역이 드러나면 조인다.
+struct ResolveDeadline {
+    private let start: DispatchTime
+    private let budget: TimeInterval
+
+    static let defaultBudget: TimeInterval = {
+        if let raw = ProcessInfo.processInfo.environment["KMSG_RESOLVE_BUDGET_MS"],
+           let ms = Double(raw),
+           ms > 0
+        {
+            return ms / 1000
+        }
+        return 8.0
+    }()
+
+    init(budget: TimeInterval = ResolveDeadline.defaultBudget) {
+        self.start = .now()
+        self.budget = budget
+    }
+
+    var elapsed: TimeInterval {
+        Double(DispatchTime.now().uptimeNanoseconds &- start.uptimeNanoseconds) / 1_000_000_000
+    }
+
+    var isExceeded: Bool {
+        elapsed >= budget
+    }
+
+    func describe(_ step: String) -> String {
+        "[\(ChatWindowFailureCode.resolveBudget.rawValue)] gave up before \(step): "
+            + String(format: "%.2fs", elapsed) + " spent of a "
+            + String(format: "%.2fs", budget) + " resolve budget"
+    }
 }
 
 private struct SearchScanProfile {
@@ -77,6 +124,10 @@ struct ChatWindowResolver {
     private static let minimumReadableWindowSize = CGSize(width: 760, height: 900)
     private static let minimumSplitWindowSize = CGSize(width: 520, height: 680)
     private static let maximumAutomaticWindowSize = CGSize(width: 1200, height: 1000)
+    /// 채팅 목록에서 chat-id 해석이 훑는 행 수. 제목 훑기와 레지스트리 스캔이 **같은**
+    /// 값을 써야 한다 — 다르면 뒤엣것이 앞엣것이 이미 본 행을 다시 걷거나, 앞엣것이
+    /// 본 행을 뒤엣것이 못 본다.
+    private static let chatListResolveHorizon = 200
 
     private let kakao: KakaoTalkApp
     private let runner: AXActionRunner
@@ -84,6 +135,10 @@ struct ChatWindowResolver {
     private let deepRecoveryEnabled: Bool
     private let layoutMode: ChatWindowLayoutMode
     private let interactionMode: ChatWindowInteractionMode
+    /// 요약 줄에 실을 사실을 호출자(커맨드의 PhaseProfiler)로 흘린다. runner.log 는
+    /// --trace-ax 없이는 안 보이는데 브릿지는 그 플래그 없이 돌아서, resolve 가 어디서
+    /// 시간을 썼는지 프로덕션에서 답할 수 있는 창구가 여기뿐이다.
+    private let note: (String, String) -> Void
 
     init(
         kakao: KakaoTalkApp,
@@ -91,7 +146,8 @@ struct ChatWindowResolver {
         useCache: Bool = true,
         deepRecoveryEnabled: Bool = false,
         layoutMode: ChatWindowLayoutMode = .preserve,
-        interactionMode: ChatWindowInteractionMode = .allowUIAutomation
+        interactionMode: ChatWindowInteractionMode = .allowUIAutomation,
+        note: @escaping (String, String) -> Void = { _, _ in }
     ) {
         self.kakao = kakao
         self.runner = runner
@@ -99,6 +155,11 @@ struct ChatWindowResolver {
         self.deepRecoveryEnabled = deepRecoveryEnabled
         self.layoutMode = layoutMode
         self.interactionMode = interactionMode
+        self.note = note
+    }
+
+    private func noteSeconds(_ key: String, _ seconds: TimeInterval) {
+        note(key, String(format: "%.2f", seconds))
     }
 
     func resolve(query: String) throws -> ChatWindowResolution {
@@ -113,11 +174,22 @@ struct ChatWindowResolver {
             return ChatWindowResolution(window: existingWindow, method: .existingWindow)
         }
 
+        let deadline = ResolveDeadline()
         let searchWindow = selectSearchWindow(fallback: usableWindow)
         standardizeReadableWindow(searchWindow, label: "search root window")
-        let chatWindow = try openChatViaSearch(query: query, in: searchWindow, fallbackWindow: usableWindow)
+        let chatWindow = try searchStep(deadline) {
+            try openChatViaSearch(query: query, in: searchWindow, fallbackWindow: usableWindow, deadline: deadline)
+        }
         standardizeReadableWindow(chatWindow, label: "opened chat window")
         return ChatWindowResolution(window: chatWindow, method: .openedViaSearch)
+    }
+
+    /// 검색 경로의 벽시계를 요약 줄에 남긴다. 성공·실패 양쪽에서 남겨야 "실패가 왜
+    /// 오래 걸렸나"를 답한다.
+    private func searchStep(_ deadline: ResolveDeadline, _ body: () throws -> UIElement) rethrows -> UIElement {
+        let before = deadline.elapsed
+        defer { noteSeconds("res.search", deadline.elapsed - before) }
+        return try body()
     }
 
     func resolve(chatID: String) throws -> ChatWindowResolution {
@@ -137,17 +209,34 @@ struct ChatWindowResolver {
             return ChatWindowResolution(window: existingWindow, method: .existingWindow)
         }
 
-        if let chatListWindow = ensureChatListWindow(),
-           let chatWindow = openChatListRow(chatID: chatID, query: query, in: chatListWindow, fallbackWindow: usableWindow)
-        {
-            standardizeReadableWindow(chatWindow, label: "opened chat window")
-            return ChatWindowResolution(window: chatWindow, method: .openedViaChatList)
+        let deadline = ResolveDeadline()
+        if let chatListWindow = ensureChatListWindow() {
+            let listStart = deadline.elapsed
+            let chatWindow = openChatListRow(
+                chatID: chatID,
+                query: query,
+                in: chatListWindow,
+                fallbackWindow: usableWindow,
+                deadline: deadline
+            )
+            noteSeconds("res.list", deadline.elapsed - listStart)
+            if let chatWindow {
+                standardizeReadableWindow(chatWindow, label: "opened chat window")
+                return ChatWindowResolution(window: chatWindow, method: .openedViaChatList)
+            }
         }
 
+        // 목록 사다리를 다 내려온 뒤라 남은 예산이 얼마 없을 수 있다. 검색은 이 해석에서
+        // 가장 비싼 단계이므로 시작 전에 한 번 끊는다.
+        guard !deadline.isExceeded else {
+            throw KakaoTalkError.actionFailed(deadline.describe("the search fallback"))
+        }
         runner.log("chat_id: falling back to search for '\(query)'")
         let searchWindow = selectSearchWindow(fallback: usableWindow)
         standardizeReadableWindow(searchWindow, label: "search root window")
-        let chatWindow = try openChatViaSearch(query: query, in: searchWindow, fallbackWindow: usableWindow)
+        let chatWindow = try searchStep(deadline) {
+            try openChatViaSearch(query: query, in: searchWindow, fallbackWindow: usableWindow, deadline: deadline)
+        }
         standardizeReadableWindow(chatWindow, label: "opened chat window")
         return ChatWindowResolution(window: chatWindow, method: .openedViaSearch)
     }
@@ -312,7 +401,12 @@ struct ChatWindowResolver {
         return restored
     }
 
-    private func openChatViaSearch(query: String, in rootWindow: UIElement, fallbackWindow: UIElement) throws -> UIElement {
+    private func openChatViaSearch(
+        query: String,
+        in rootWindow: UIElement,
+        fallbackWindow: UIElement,
+        deadline: ResolveDeadline
+    ) throws -> UIElement {
         runner.log("search: locating search field")
 
         guard let searchField = locateSearchField(in: rootWindow) else {
@@ -355,6 +449,12 @@ struct ChatWindowResolver {
 
         var matchingCandidates = waitForMatchingSearchResults(query: query, rootWindow: rootWindow)
         if matchingCandidates.isEmpty {
+            // 후보 대기는 waitUntil 의 timeout(0.22s/0.75s)보다 훨씬 오래 걸릴 수 있다 —
+            // 한 폴 회차가 candidateNodeBudget 만큼 AX 트리를 걷고, waitUntil 은 회차
+            // 중간에 끊지 못한다. 그래서 두 번째 대기에 들어가기 전에 예산을 본다.
+            guard !deadline.isExceeded else {
+                throw KakaoTalkError.actionFailed(deadline.describe("the Enter-commit retry"))
+            }
             // Like the friend-add ID search, KakaoTalk's chat search commits on
             // Enter — typing alone can leave the result list unpopulated.
             runner.log("search: no candidates after typing; committing search via Enter")
@@ -372,6 +472,11 @@ struct ChatWindowResolver {
             throw KakaoTalkError.elementNotFound("[\(ChatWindowFailureCode.searchMiss.rawValue)] No search result found for '\(query)'")
         }
 
+        // 결과를 여는 단계도 여러 번 시도한다(활성화 → 더블클릭 → 선택 → Enter →
+        // Down+Enter). 여기까지 예산을 다 썼으면 그 사다리를 시작하지 않는다.
+        guard !deadline.isExceeded else {
+            throw KakaoTalkError.actionFailed(deadline.describe("opening the matched search result"))
+        }
         let openTriggered = triggerSearchResultOpen(
             matchingResult,
             searchField: searchField
@@ -468,7 +573,15 @@ struct ChatWindowResolver {
         return (searchField.stringValue ?? "").isEmpty
     }
 
-    private func openChatListRow(chatID: String, query: String, in chatListWindow: UIElement, fallbackWindow: UIElement) -> UIElement? {
+    private var titleScanHorizon: Int { Self.chatListResolveHorizon }
+
+    private func openChatListRow(
+        chatID: String,
+        query: String,
+        in chatListWindow: UIElement,
+        fallbackWindow: UIElement,
+        deadline: ResolveDeadline
+    ) -> UIElement? {
         runner.log("chat_id: scanning chat list rows")
         standardizeReadableWindow(chatListWindow, label: "chat list window")
         let scanner = ChatListScanner()
@@ -489,17 +602,38 @@ struct ChatWindowResolver {
         // beyond the horizon — and the server refuses duplicate-title
         // bindings anyway — so fall through to the registry scan only when
         // no title matches at all.
-        if let fastRow = scanner.firstRow(titled: query, in: chatListWindow, limit: 200, trace: { message in
+        // 스캔 한 번은 통째로 블로킹이라 중간에 못 끊는다(스캐너까지 deadline 을 내리면
+        // 행마다 시계를 보게 된다). 그래서 끊는 자리는 스캔과 스캔 **사이**뿐이고, 그
+        // 대신 매번 확인한다 — 실측에서 이 목록 구간 하나가 33.02s 를 쓴 적이 있다.
+        guard !deadline.isExceeded else {
+            runner.log("chat_id: \(deadline.describe("the chat list title scan"))")
+            return nil
+        }
+        if let fastRow = scanner.firstRow(titled: query, in: chatListWindow, limit: titleScanHorizon, trace: { message in
             runner.log(message)
         }) {
             runner.log("chat_id: matched row by title '\(query)'")
             return openMatchedRow(fastRow, query: query, in: chatListWindow, fallbackWindow: fallbackWindow)
         }
 
+        // 여기까지 왔다는 것은 위의 제목 훑기가 **이미 200행을 다 봤다**는 뜻이다. 그러니
+        // 20 → 60 → 200 으로 올라가는 사다리는 같은 행들을 세 번 더 걷는 것뿐이다 —
+        // 20/60 단계는 정의상 200행 안에 있고 제목으로는 이미 안 맞는 것이 확인됐다.
+        // 사다리가 벌어주는 것은 "위쪽에서 일찍 맞으면 싸다"인데, 그 싼 경우는 위의 제목
+        // 경로가 이미 가져갔다. 이 아래로 내려온 해석은 실패로 끝나는 쪽이 대부분이라
+        // 사다리는 그 실패를 비싸게 만들 뿐이다(2026-08-09 최희연: resolve=18.53 후 실패).
+        //
+        // 그래도 이 스캔이 필요한 이유는 판정 기준이 다르기 때문이다. 위는 제목이 **정확히**
+        // 같아야 하지만 여기는 chat id, 즉 정규화한 제목의 해시로 맞춘다 — 공백·문장부호·
+        // 대소문자만 다른 방과 동명이인 접미사(_2)는 여기서만 걸린다.
         var snapshots: [ChatListSnapshotItem] = []
         var matchIndex: Int?
         var friendsTabRecovered = false
-        for horizon in [20, 60, 200] {
+        for horizon in [titleScanHorizon] {
+            guard !deadline.isExceeded else {
+                runner.log("chat_id: \(deadline.describe("the registry scan"))")
+                return nil
+            }
             snapshots = scanner.scan(in: chatListWindow, limit: horizon, trace: { message in
                 runner.log(message)
             })

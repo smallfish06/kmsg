@@ -133,7 +133,8 @@ struct ReadCommand: ParsableCommand {
             runner: runner,
             deepRecoveryEnabled: deepRecovery,
             layoutMode: layout,
-            interactionMode: backgroundSafe ? .backgroundSafe : .allowUIAutomation
+            interactionMode: backgroundSafe ? .backgroundSafe : .allowUIAutomation,
+            note: { key, value in profiler.note(key, value) }
         )
         let transcriptReader = KakaoTalkTranscriptReader(
             kakao: kakao,
