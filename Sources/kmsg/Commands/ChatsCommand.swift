@@ -136,6 +136,12 @@ struct ChatsCommand: ParsableCommand {
                     ? "chats: empty scan — switching to the chats tab (⌘2) and rescanning"
                     : "chats: scan is not the chat list — switching to the chats tab (⌘2) and rescanning"
             )
+            // 요약 줄에 남긴다. `runner.log` 는 `--trace-ax` 없이는 아무 데도 안 가는데
+            // 브릿지는 그 플래그 없이 돈다 — 그래서 이 복구는 프로덕션에서 완전히
+            // 보이지 않는다. 하필 이 상태의 대가가 조용한 수신 정지라 "몇 번이나
+            // 일어나고 있나"가 곧 다음 조사의 첫 질문이 된다 (`searchcleared` 와
+            // 같은 이유, 같은 자리).
+            profiler.note("tabrecovered", "1")
             kakao.activate()
             runner.pressCommandTwo()
             Thread.sleep(forTimeInterval: 0.4)

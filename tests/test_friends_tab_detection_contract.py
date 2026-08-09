@@ -149,6 +149,17 @@ class FriendsTabDetectionContractTests(unittest.TestCase):
             source.index("runner.pressCommandTwo()"),
         )
 
+    def test_recovery_is_visible_without_trace_ax(self) -> None:
+        # runner.log 는 --trace-ax 없이는 어디에도 안 간다. 브릿지는 그 플래그 없이
+        # 도는데 이 상태의 대가는 조용한 수신 정지라, 요약 줄에 안 남기면 재발이
+        # 프로덕션에서 또 안 보인다.
+        source = CHATS_COMMAND.read_text(encoding="utf-8")
+        self.assertIn('profiler.note("tabrecovered", "1")', source)
+        self.assertLess(
+            source.index('profiler.note("tabrecovered", "1")'),
+            source.index("runner.pressCommandTwo()"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
