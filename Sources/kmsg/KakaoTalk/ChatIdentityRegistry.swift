@@ -40,6 +40,18 @@ final class ChatIdentityRegistryStore: @unchecked Sendable {
         self.decoder = decoder
     }
 
+    /// How many chat rooms this installation has actually seen recently.
+    ///
+    /// The scan has no other way to judge its own result: a list that returns
+    /// one row looks exactly like a list that HAS one row. This registry is the
+    /// only place kmsg remembers how big the list really is (records evict
+    /// after the stale cutoff, so it tracks reality rather than all-time
+    /// history). Zero on a fresh install, which callers must read as "no
+    /// opinion" rather than "empty list".
+    var knownChatCount: Int {
+        loadDocument().records.count
+    }
+
     func assignChatIDs(for discoveries: [ChatListDiscovery]) -> [String] {
         var document = loadDocument()
         var records = document.records
