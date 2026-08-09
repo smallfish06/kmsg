@@ -75,6 +75,18 @@ struct ChatsCommand: ParsableCommand {
         }
 
         runner.log("chats: usable window ready")
+
+        // 남은 검색어는 목록을 필터한 채로 두고, 그 상태는 프로세스가 아니라 카톡
+        // GUI 에 남아 다음 실행들에 그대로 상속된다 — 스캔은 status=done 으로
+        // 한두 행을 정상 결과처럼 돌려주고, 호출자에게는 방들이 사라진 것으로 보인다
+        // (2026-08-09 09:50~10:00 UTC: rows=1 이 153회 연속, 그 10분간 read/send 0건).
+        // 아래 재스캔은 이걸 못 고친다. 덜 그려진 목록은 기다리면 채워지지만 필터된
+        // 목록은 지워주기 전까지 영원히 그대로다.
+        if chatWindowResolver.clearChatListSearchIfDirty(in: mainWindow) {
+            profiler.note("searchcleared", "1")
+            Thread.sleep(forTimeInterval: 0.35)
+        }
+
         profiler.begin("scan")
         let scanner = ChatListScanner()
         var snapshots = scanner.scan(in: mainWindow, limit: limit, trace: { message in

@@ -319,6 +319,22 @@ struct ChatWindowResolver {
             throw KakaoTalkError.elementNotFound("[\(ChatWindowFailureCode.searchMiss.rawValue)] Search field not found")
         }
 
+        // 검색은 방을 열면 끝나지만 검색어는 창에 남는다. 그 상태는 프로세스가 아니라
+        // 카톡 GUI 에 남으므로 **뒤이어 뜨는 모든 kmsg 실행이 통째로 물려받는다** —
+        // 목록이 필터된 채라 `chats` 는 한두 행짜리 결과를 정상으로 돌려주고,
+        // `--chat-id` 해석은 그 목록에서 행을 못 찾아 매번 검색 경로로 떨어져 필터를
+        // 다시 깐다(스스로 일감을 만드는 고리). 실측 2026-08-09 09:50~10:00 UTC:
+        // rows=1 스캔이 153회 연속, 그 10분간 read/send 0건(수신 전면 정지), 복구
+        // 직후의 첫 read 는 resolve 에만 16.0s 를 썼다.
+        //
+        // 그래서 성공·실패를 가리지 않고 나가면서 끈다. 종전에는 실패 경로에만
+        // pressEscape 가 있어서, **정확히 잘 된 검색만** 필터를 남겼다.
+        //
+        // 정리는 목록 창의 검색창에 포커스를 주므로 방금 연 채팅창을 덮을 수 있다.
+        // 두 호출자 모두 반환 직후 standardizeReadableWindow 로 그 창을 다시 올리므로
+        // (그게 캡처가 가려지지 않는다는 보장이다) 여기서 따로 되돌리지 않는다.
+        defer { clearChatListSearch(searchField, in: rootWindow, label: query) }
+
         guard runner.focusWithVerification(searchField, label: "search field", attempts: 1) else {
             throw KakaoTalkError.actionFailed("[\(ChatWindowFailureCode.focusFail.rawValue)] Could not focus search field")
         }
@@ -334,7 +350,6 @@ struct ChatWindowResolver {
             runner.setTextWithVerification(query, on: searchField, label: "search field input", attempts: 1)
 
         guard searchInputReady else {
-            runner.pressEscape()
             throw KakaoTalkError.actionFailed("[\(ChatWindowFailureCode.inputNotReflected.rawValue)] Search keyword was not entered")
         }
 
@@ -354,7 +369,6 @@ struct ChatWindowResolver {
             }
         }
         guard let matchingResult = pickBestSearchResult(from: matchingCandidates) else {
-            runner.pressEscape()
             throw KakaoTalkError.elementNotFound("[\(ChatWindowFailureCode.searchMiss.rawValue)] No search result found for '\(query)'")
         }
 
@@ -365,7 +379,6 @@ struct ChatWindowResolver {
             resolveOpenedChatWindowFast(query: query) != nil
         }
         guard openTriggered else {
-            runner.pressEscape()
             throw KakaoTalkError.actionFailed("[\(ChatWindowFailureCode.searchMiss.rawValue)] Could not open matched search result")
         }
 
@@ -374,6 +387,85 @@ struct ChatWindowResolver {
         }
 
         throw KakaoTalkError.windowNotFound("[\(ChatWindowFailureCode.windowNotReady.rawValue)] Chat window for '\(query)' did not open")
+    }
+
+    /// 채팅 목록의 검색어를 지운다.
+    ///
+    /// **값만 비우면(AXValue) 안 된다** — 카톡 검색은 실제 키 이벤트에만 반응해서
+    /// (검색어를 넣을 때 타이핑을 쓰는 것과 같은 이유), AXValue 로 비우면 필드는
+    /// 비었는데 목록은 필터된 채로 남는다. 그건 지금 상태보다 나쁘다: 눈에 보이는
+    /// 증거까지 사라진다.
+    ///
+    /// 필드를 잡지 못하면 **키를 하나도 보내지 않는다.** 포커스가 다른 창에 있으면
+    /// ⌘A 와 delete 가 그 창으로 가고, 그 창은 채팅창일 수 있다.
+    private func clearChatListSearch(_ searchField: UIElement, in rootWindow: UIElement, label: String) {
+        guard !(searchField.stringValue ?? "").isEmpty else { return }
+
+        // AX 포커스와 키 이벤트의 목적지는 다른 축이다. focusWithVerification 은 AX
+        // 속성을 세팅할 뿐이고, pressCommandA/pressDeleteKey 는 CGEvent 라 **프론트모스트
+        // 앱**으로 간다 — 카톡을 올리지 않으면 그 키는 이 프로세스를 띄운 터미널로 간다
+        // (첫 판이 정확히 그래서 "FAILED to clear" 로 죽었다). 이 파일의 다른 키 입력
+        // 자리들이 전부 activate 를 먼저 부르는 이유가 이거다.
+        kakao.activate()
+        _ = tryRaiseWindow(rootWindow)
+        Thread.sleep(forTimeInterval: 0.08)
+
+        guard runner.focusWithVerification(searchField, label: "search field clear", attempts: 1) else {
+            runner.log("search: could not focus the field to clear '\(label)' — the chat list may stay filtered")
+            return
+        }
+
+        runner.pressCommandA()
+        runner.pressDeleteKey()
+
+        var cleared = runner.waitUntil(
+            label: "search field emptied",
+            timeout: 0.3,
+            pollInterval: 0.05,
+            evaluateAfterTimeout: true
+        ) {
+            (searchField.stringValue ?? "").isEmpty
+        }
+
+        // 필드를 잡은 상태에서의 Escape 는 검색을 통째로 끝낸다(NSSearchField 기본 동작).
+        // 한 번 더 쓰는 이유는 실패의 대가가 비대칭이라서다 — 여기서 못 지우면 다음
+        // 스캔들이 필터된 목록을 정상 결과로 돌려준다.
+        if !cleared {
+            runner.log("search: cmd+A/delete did not empty '\(label)'; retrying with escape")
+            runner.pressEscapeKey()
+            cleared = runner.waitUntil(
+                label: "search field emptied (escape)",
+                timeout: 0.3,
+                pollInterval: 0.05,
+                evaluateAfterTimeout: true
+            ) {
+                (searchField.stringValue ?? "").isEmpty
+            }
+        }
+        // 실패는 조용히 넘어가면 안 된다: 다음 `chats` 가 필터된 목록을 정상 결과로
+        // 돌려주는 게 바로 여기서 시작한다.
+        runner.log(cleared ? "search: cleared '\(label)' from the chat list search field"
+                           : "search: FAILED to clear '\(label)' — the chat list is still filtered")
+    }
+
+    /// 목록이 남은 검색어로 필터돼 있으면 지운다. 지웠으면 true.
+    ///
+    /// 위의 정리와 중복이지만 겨냥하는 게 다르다 — 저건 우리가 만든 잔재를 그 자리에서
+    /// 치우는 것이고, 이건 **누가 남겼든** (사람이 그 Mac 에서 직접 검색창에 타이핑한
+    /// 경우 포함) 다음 스캔 한 번으로 회복시키는 그물이다. 잔재의 대가가 수신 전면
+    /// 정지라서, 정리 한 곳에만 걸어두지 않는다.
+    @discardableResult
+    func clearChatListSearchIfDirty(in window: UIElement) -> Bool {
+        guard interactionMode != .backgroundSafe else { return false }
+        // 검색창을 "찾아내려고" 버튼을 누르지는 않는다(locateSearchField 의 마지막
+        // 수단). 이건 매 tick 도는 경로라 그 부작용이 상시화된다.
+        guard let searchField = findExistingSearchField(in: window) else { return false }
+        let residue = searchField.stringValue ?? ""
+        guard !residue.isEmpty else { return false }
+
+        runner.log("chats: chat list search field still holds '\(residue)' — clearing it before the scan")
+        clearChatListSearch(searchField, in: window, label: residue)
+        return (searchField.stringValue ?? "").isEmpty
     }
 
     private func openChatListRow(chatID: String, query: String, in chatListWindow: UIElement, fallbackWindow: UIElement) -> UIElement? {
@@ -671,7 +763,9 @@ struct ChatWindowResolver {
         )
     }
 
-    private func locateSearchField(in rootWindow: UIElement) -> UIElement? {
+    /// 이미 화면에 있는 검색창만 찾는다. 부작용이 없어서 매 tick 도는 경로에서도
+    /// 부를 수 있다 — 아래 locateSearchField 는 못 찾으면 검색 버튼들을 눌러본다.
+    private func findExistingSearchField(in rootWindow: UIElement) -> UIElement? {
         if let cachedSearchField = resolveCachedElement(
             slot: .searchField,
             root: rootWindow,
@@ -685,6 +779,14 @@ struct ChatWindowResolver {
         let initialFields = discoverSearchFieldCandidates(in: rootWindow)
         if let field = pickSearchField(from: initialFields) {
             rememberCachedElement(slot: .searchField, root: rootWindow, element: field)
+            return field
+        }
+
+        return nil
+    }
+
+    private func locateSearchField(in rootWindow: UIElement) -> UIElement? {
+        if let field = findExistingSearchField(in: rootWindow) {
             return field
         }
 
