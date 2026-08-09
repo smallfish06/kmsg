@@ -258,7 +258,7 @@ struct ChatListScanner {
     ///    chats at all. Tier 1 exists because tier 2 cannot be made safe.
     func looksLikeFriendsList(
         _ snapshots: [ChatListSnapshotItem],
-        in window: UIElement? = nil,
+        in window: UIElement,
         trace: ((String) -> Void)? = nil
     ) -> Bool {
         guard !snapshots.isEmpty else { return false }
@@ -267,7 +267,11 @@ struct ChatListScanner {
         // the rows. Both directions of the row heuristic are wrong sometimes
         // and both failures are silent, so a direct answer wins whenever there
         // is one.
-        if let window, let tab = Self.detectMainWindowTab(in: window) {
+        //
+        // `window` is deliberately NOT optional with a nil default: every call
+        // site has one, and a default would let the next one silently fall
+        // through to tier 2 — the failure this whole change exists to remove.
+        if let tab = Self.detectMainWindowTab(in: window) {
             if tab == .chats { return false }
             trace?("chats: main window header says the '\(tab.rawValue)' tab is showing, not the chat list")
             return true

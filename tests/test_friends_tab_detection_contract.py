@@ -81,7 +81,10 @@ class FriendsTabDetectionContractTests(unittest.TestCase):
         # 휴리스틱이 그물로 남아야 한다.
         source = SCANNER.read_text(encoding="utf-8")
         body = _verdict_body(source)
-        self.assertIn("if let window, let tab = Self.detectMainWindowTab(in: window) {", body)
+        self.assertIn("if let tab = Self.detectMainWindowTab(in: window) {", body)
+        # 기본값 nil 을 두면 새 호출자가 조용히 2순위로 떨어진다.
+        self.assertIn("in window: UIElement,", body)
+        self.assertNotIn("in window: UIElement? = nil", body)
         # 판정자 자신은 못 알아보면 nil 을 준다.
         self.assertTrue(_detector_body(source).rstrip().endswith("return nil\n    }"))
 
