@@ -147,24 +147,52 @@ struct ChatListScanner {
         return snapshots
     }
 
-    /// Title-only row lookup with early exit: walks each row only until its
-    /// title resolves and stops at the first match, skipping the rest of the
-    /// row's subtree. Titles compare exactly because the expected title itself
-    /// came from a previous full scan's extractTitle.
-    func firstRow(titled expected: String, in window: UIElement, limit: Int, trace: ((String) -> Void)? = nil) -> UIElement? {
+    /// 한 번만 걷는 제목 조회.
+    ///
+    /// 제목이 정확히 맞는 행을 만나면 거기서 멈추고(흔한 경우 — 방금 메시지를 받은 방은
+    /// 목록 최상단에 있다), 끝까지 못 만나면 걸으면서 모은 스냅샷을 그대로 돌려준다.
+    /// 호출자는 그걸로 chat id 판정을 이어가면 되고, 목록을 다시 걸을 필요가 없다.
+    ///
+    /// 종전에는 제목 훑기(titleOnly)와 레지스트리 스캔이 **같은 200행을 각각 한 번씩**
+    /// 걸었다. 미스 경로가 400 walk 였고, 미스야말로 이 사다리를 끝까지 내려가는
+    /// 경로다 — 프로덕션 실측(2026-08-09)에서 목록 구간이 resolve 비용의 대부분이었다
+    /// (res.list 합 568s / res.search 합 116s, n=102 vs 44).
+    ///
+    /// 적중 시 행당 비용은 조금 오른다(titleOnly 대신 전체 내용을 모은다). 대신 그 경우는
+    /// 몇 행 만에 끝나고, 미스는 walk 가 절반이 된다.
+    func scanUntilTitle(
+        _ expected: String,
+        in window: UIElement,
+        limit: Int,
+        trace: ((String) -> Void)? = nil
+    ) -> (match: UIElement?, snapshots: [ChatListSnapshotItem]) {
         guard let container = resolveChatListContainer(in: window, trace: trace) else {
             trace?("chats: chat list container unavailable")
-            return nil
+            return (nil, [])
         }
         let rows = collectChatItems(from: container, limit: limit)
+        var snapshots: [ChatListSnapshotItem] = []
+        snapshots.reserveCapacity(rows.count)
+
         for (index, row) in rows.enumerated() {
-            let content = collectRowContent(from: row, titleOnly: true)
-            if extractTitle(from: content) == expected {
+            let content = collectRowContent(from: row)
+            let title = extractTitle(from: content)
+            let preview = extractPreview(from: content, title: title)
+            let unread = extractUnread(from: content)
+            snapshots.append(
+                ChatListSnapshotItem(
+                    element: row,
+                    discovery: ChatListDiscovery(title: title, lastMessage: preview, listIndex: index, unread: unread),
+                    sawClockText: content.sawClockText
+                )
+            )
+            // 제목은 정확히 비교한다 — 기대값 자체가 이전 스캔의 extractTitle 에서 왔다.
+            if title == expected {
                 trace?("chats: title fast path matched row \(index + 1)")
-                return row
+                return (row, snapshots)
             }
         }
-        return nil
+        return (nil, snapshots)
     }
 
     /// The friends tab masquerades as a chat list: same row container, same

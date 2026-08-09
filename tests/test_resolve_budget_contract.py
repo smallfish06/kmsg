@@ -37,13 +37,27 @@ class ResolveBudgetContractTests(unittest.TestCase):
         source = RESOLVER.read_text(encoding="utf-8")
         self.assertIn('environment["KMSG_RESOLVE_BUDGET_MS"]', source)
 
-    def test_registry_scan_does_not_re_climb_what_the_title_scan_already_walked(self) -> None:
-        # 종전에는 제목으로 200행을 훑은 뒤 20 → 60 → 200 으로 다시 올라갔다. 20/60 은
-        # 정의상 그 200행 안에 있으므로 같은 행을 세 번 더 걷는 것뿐이다. 사다리가 벌어주는
-        # "위에서 일찍 맞으면 싸다"는 이미 제목 경로가 가져갔다.
+    def test_the_chat_list_is_walked_once(self) -> None:
+        # 세 판이 있었다. ① 제목 훑기 + 20/60/200 사다리(같은 행을 네 번 걷는다),
+        # ② 제목 훑기 + 단일 스캔(두 번), ③ 지금 — 걸으면서 스냅샷을 모으고 제목이
+        # 맞으면 멈춘다(한 번). 사다리를 끝까지 내려가는 미스 경로가 이 비용을 다 문다:
+        # 실측 res.list 합 568s(n=102) 대 res.search 합 116s(n=44).
         body = _open_chat_list_row_body(RESOLVER.read_text(encoding="utf-8"))
-        self.assertIn("for horizon in [titleScanHorizon]", body)
+        self.assertIn("scanner.scanUntilTitle(", body)
         self.assertNotIn("[20, 60, 200]", body)
+        self.assertNotIn("for horizon in", body)
+        # 별도의 전체 스캔이 남아 있으면 다시 두 번 걷는 것이다. 탭 복구(⌘2) 경로도
+        # scanUntilTitle 을 써야 한다.
+        self.assertNotIn("scanner.scan(", body)
+        self.assertNotIn("scanner.firstRow(", body)
+
+    def test_both_match_criteria_survive_the_merge(self) -> None:
+        # 걷기는 합쳐도 판정은 둘 다 남아야 한다. 제목 완전일치가 못 잡는 것을 chat id
+        # (정규화한 제목의 해시)가 잡는다 — 공백·문장부호·대소문자만 다른 방과 동명이인
+        # 접미사(_2). 하나로 줄이면 그 방들이 영영 해석되지 않는다.
+        body = _open_chat_list_row_body(RESOLVER.read_text(encoding="utf-8"))
+        self.assertIn("if let titleMatch {", body)
+        self.assertIn("registry.assignChatIDs(for: snapshots.map(", body)
 
     def test_both_scans_share_one_horizon(self) -> None:
         # 두 값이 갈리면 뒤엣것이 앞엣것이 이미 본 행을 다시 걷거나, 앞엣것이 본 행을
@@ -52,14 +66,14 @@ class ResolveBudgetContractTests(unittest.TestCase):
         self.assertIn("private static let chatListResolveHorizon = 200", source)
         body = _open_chat_list_row_body(source)
         self.assertIn("limit: titleScanHorizon", body)
+        self.assertNotIn("limit: 200", body)
 
     def test_budget_is_checked_between_every_blocking_scan(self) -> None:
         # 스캔 한 번은 통째로 블로킹이라 중간에 못 끊는다. 끊을 수 있는 자리는 스캔과
         # 스캔 사이뿐이므로, 그 자리를 하나도 빠뜨리면 안 된다.
         source = RESOLVER.read_text(encoding="utf-8")
         for step in [
-            "the chat list title scan",
-            "the registry scan",
+            "the chat list scan",
             "the search fallback",
             "the Enter-commit retry",
             "opening the matched search result",

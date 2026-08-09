@@ -595,83 +595,72 @@ struct ChatWindowResolver {
         // id assignment for the found prefix matches what a full scan would
         // assign except when a same-title chat first appears beyond the
         // current horizon — a case the server refuses to bind anyway.
-        // Title-first fast path: the registry already knows the chat's
-        // display title, and extracting ONLY titles costs a fraction of the
-        // full title+preview registry scan. First-match-by-title carries the
-        // same duplicate-title ambiguity the registry match has for rows
-        // beyond the horizon — and the server refuses duplicate-title
-        // bindings anyway — so fall through to the registry scan only when
-        // no title matches at all.
+        //
+        // **목록은 한 번만 걷는다.** 종전에는 제목 훑기와 레지스트리 스캔이 같은 200행을
+        // 각각 한 번씩 걸어 미스 경로가 400 walk 였는데, 사다리를 끝까지 내려가는 것이
+        // 바로 그 미스 경로다. 프로덕션 실측(2026-08-09, 재시작 직후 sweep n=121):
+        // res.list 합 568s(n=102) 대 res.search 합 116s(n=44) — 목록이 비용의 대부분이다.
+        // scanUntilTitle 은 걸으면서 스냅샷을 모으고 제목이 맞으면 거기서 멈추므로,
+        // 적중은 예전처럼 몇 행에서 끝나고 미스는 walk 가 절반이 된다.
+        //
         // 스캔 한 번은 통째로 블로킹이라 중간에 못 끊는다(스캐너까지 deadline 을 내리면
-        // 행마다 시계를 보게 된다). 그래서 끊는 자리는 스캔과 스캔 **사이**뿐이고, 그
-        // 대신 매번 확인한다 — 실측에서 이 목록 구간 하나가 33.02s 를 쓴 적이 있다.
+        // 행마다 시계를 보게 된다). 그래서 끊는 자리는 스캔 **앞**뿐이다 — 실측에서 이
+        // 목록 구간 하나가 33.02s 를 쓴 적이 있고, 8초 예산도 그건 못 막는다.
         guard !deadline.isExceeded else {
-            runner.log("chat_id: \(deadline.describe("the chat list title scan"))")
+            runner.log("chat_id: \(deadline.describe("the chat list scan"))")
             return nil
         }
-        if let fastRow = scanner.firstRow(titled: query, in: chatListWindow, limit: titleScanHorizon, trace: { message in
-            runner.log(message)
-        }) {
+        var (titleMatch, snapshots) = scanner.scanUntilTitle(
+            query,
+            in: chatListWindow,
+            limit: titleScanHorizon,
+            trace: { message in runner.log(message) }
+        )
+        note("res.rows", String(snapshots.count))
+        if let titleMatch {
             runner.log("chat_id: matched row by title '\(query)'")
-            return openMatchedRow(fastRow, query: query, in: chatListWindow, fallbackWindow: fallbackWindow)
+            return openMatchedRow(titleMatch, query: query, in: chatListWindow, fallbackWindow: fallbackWindow)
         }
 
-        // 여기까지 왔다는 것은 위의 제목 훑기가 **이미 200행을 다 봤다**는 뜻이다. 그러니
-        // 20 → 60 → 200 으로 올라가는 사다리는 같은 행들을 세 번 더 걷는 것뿐이다 —
-        // 20/60 단계는 정의상 200행 안에 있고 제목으로는 이미 안 맞는 것이 확인됐다.
-        // 사다리가 벌어주는 것은 "위쪽에서 일찍 맞으면 싸다"인데, 그 싼 경우는 위의 제목
-        // 경로가 이미 가져갔다. 이 아래로 내려온 해석은 실패로 끝나는 쪽이 대부분이라
-        // 사다리는 그 실패를 비싸게 만들 뿐이다(2026-08-09 최희연: resolve=18.53 후 실패).
-        //
-        // 그래도 이 스캔이 필요한 이유는 판정 기준이 다르기 때문이다. 위는 제목이 **정확히**
-        // 같아야 하지만 여기는 chat id, 즉 정규화한 제목의 해시로 맞춘다 — 공백·문장부호·
-        // 대소문자만 다른 방과 동명이인 접미사(_2)는 여기서만 걸린다.
-        var snapshots: [ChatListSnapshotItem] = []
-        var matchIndex: Int?
-        var friendsTabRecovered = false
-        for horizon in [titleScanHorizon] {
-            guard !deadline.isExceeded else {
-                runner.log("chat_id: \(deadline.describe("the registry scan"))")
-                return nil
-            }
-            snapshots = scanner.scan(in: chatListWindow, limit: horizon, trace: { message in
-                runner.log(message)
-            })
-            guard !snapshots.isEmpty else {
-                runner.log("chat_id: chat list scan returned no rows")
-                return nil
-            }
-            // The main window sitting on the friends tab scans "successfully"
-            // but yields friend rows whose titles never match a chat — the
-            // scan then widens to 200 rows and falls back to search, wasting
-            // ~10s. Mirror ChatsCommand: detect the timestamp-less friends
-            // list and switch to the chats tab (⌘2) once.
-            if !friendsTabRecovered, scanner.looksLikeFriendsList(snapshots, trace: { runner.log($0) }) {
-                friendsTabRecovered = true
-                runner.log("chat_id: scan looks like the FRIENDS list — switching to the chats tab (⌘2) and rescanning")
-                kakao.activate()
-                runner.pressCommandTwo()
-                Thread.sleep(forTimeInterval: 0.4)
-                snapshots = scanner.scan(in: chatListWindow, limit: horizon, trace: { message in
-                    runner.log(message)
-                })
-                guard !snapshots.isEmpty else {
-                    runner.log("chat_id: chat list scan returned no rows after tab recovery")
-                    return nil
-                }
-            }
-            let assignedIDs = registry.assignChatIDs(for: snapshots.map(\.discovery))
-            if let index = assignedIDs.firstIndex(of: chatID) {
-                matchIndex = index
-                break
-            }
-            if snapshots.count < horizon {
-                break
-            }
-            runner.log("chat_id: no match in top \(snapshots.count) rows; widening scan")
+        guard !snapshots.isEmpty else {
+            runner.log("chat_id: chat list scan returned no rows")
+            return nil
         }
-        guard let matchIndex else {
-            runner.log("chat_id: no visible chat row matched \(chatID)")
+
+        // The main window sitting on the friends tab scans "successfully"
+        // but yields friend rows whose titles never match a chat — the scan
+        // then falls back to search, wasting ~10s. Mirror ChatsCommand:
+        // detect the timestamp-less friends list and switch to the chats
+        // tab (⌘2) once.
+        if scanner.looksLikeFriendsList(snapshots, trace: { runner.log($0) }) {
+            runner.log("chat_id: scan looks like the FRIENDS list — switching to the chats tab (⌘2) and rescanning")
+            kakao.activate()
+            runner.pressCommandTwo()
+            Thread.sleep(forTimeInterval: 0.4)
+            let recovered = scanner.scanUntilTitle(
+                query,
+                in: chatListWindow,
+                limit: titleScanHorizon,
+                trace: { message in runner.log(message) }
+            )
+            if let recoveredMatch = recovered.match {
+                runner.log("chat_id: matched row by title '\(query)' after tab recovery")
+                return openMatchedRow(recoveredMatch, query: query, in: chatListWindow, fallbackWindow: fallbackWindow)
+            }
+            guard !recovered.snapshots.isEmpty else {
+                runner.log("chat_id: chat list scan returned no rows after tab recovery")
+                return nil
+            }
+            snapshots = recovered.snapshots
+        }
+
+        // 제목이 정확히 안 맞아도 여기서 걸릴 수 있다. 판정 기준이 다르기 때문이다 —
+        // 위는 제목 완전일치이고 여기는 chat id, 즉 정규화한 제목의 해시다. 공백·문장부호·
+        // 대소문자만 다른 방과 동명이인 접미사(_2)는 이 판정에서만 갈린다. 그래서 걷기는
+        // 합쳐도 판정은 둘 다 남긴다.
+        let assignedIDs = registry.assignChatIDs(for: snapshots.map(\.discovery))
+        guard let matchIndex = assignedIDs.firstIndex(of: chatID) else {
+            runner.log("chat_id: no visible chat row matched \(chatID) in top \(snapshots.count) rows")
             return nil
         }
 
