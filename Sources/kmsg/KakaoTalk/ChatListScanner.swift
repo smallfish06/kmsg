@@ -160,21 +160,38 @@ struct ChatListScanner {
     ///
     /// 적중 시 행당 비용은 조금 오른다(titleOnly 대신 전체 내용을 모은다). 대신 그 경우는
     /// 몇 행 만에 끝나고, 미스는 walk 가 절반이 된다.
+    /// `shouldStop` 은 `stopCheckStride` 행마다 한 번만 묻는다.
+    ///
+    /// 종전에는 스캔 한 번을 통째로 블로킹으로 두고 예산은 스캔 **앞**에서만 끊었다.
+    /// 근거는 "행마다 시계를 보게 된다"였는데, 지평선이 목록보다 짧던 동안에는 walk 의
+    /// 최악값이 지평선에 묶여 있어서 그 선택이 안전했다. 지평선을 목록 길이까지 열면
+    /// 그 상한이 같이 풀리므로(200행 ≈ 5.8s → 500행 ≈ 14.5s, 기본 예산 8초를 넘긴다)
+    /// 안쪽에도 끊을 자리가 있어야 한다. 25행에 한 번이면 시계 비용은 행당 비용의
+    /// 1/25 이라 무시할 수 있고, 끊긴 walk 는 지금까지 모은 스냅샷을 그대로 돌려주므로
+    /// 호출자의 id 판정은 접두부에 대해 그대로 성립한다 — 지평선에 잘린 walk 와 같은
+    /// 상태이고, 그건 이 코드가 이미 다루던 경우다.
+    static let stopCheckStride = 25
+
     func scanUntilTitle(
         _ expected: String,
         in window: UIElement,
         limit: Int,
+        shouldStop: (() -> Bool)? = nil,
         trace: ((String) -> Void)? = nil
-    ) -> (match: UIElement?, snapshots: [ChatListSnapshotItem]) {
+    ) -> (match: UIElement?, snapshots: [ChatListSnapshotItem], stoppedEarly: Bool) {
         guard let container = resolveChatListContainer(in: window, trace: trace) else {
             trace?("chats: chat list container unavailable")
-            return (nil, [])
+            return (nil, [], false)
         }
         let rows = collectChatItems(from: container, limit: limit)
         var snapshots: [ChatListSnapshotItem] = []
         snapshots.reserveCapacity(rows.count)
 
         for (index, row) in rows.enumerated() {
+            if let shouldStop, index > 0, index % Self.stopCheckStride == 0, shouldStop() {
+                trace?("chats: title walk stopped early at row \(index) of \(rows.count)")
+                return (nil, snapshots, true)
+            }
             let content = collectRowContent(from: row)
             let title = extractTitle(from: content)
             let preview = extractPreview(from: content, title: title)
@@ -189,10 +206,10 @@ struct ChatListScanner {
             // 제목은 정확히 비교한다 — 기대값 자체가 이전 스캔의 extractTitle 에서 왔다.
             if title == expected {
                 trace?("chats: title fast path matched row \(index + 1)")
-                return (row, snapshots)
+                return (row, snapshots, false)
             }
         }
-        return (nil, snapshots)
+        return (nil, snapshots, false)
     }
 
     /// The friends tab masquerades as a chat list: same row container, same

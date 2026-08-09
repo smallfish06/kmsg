@@ -61,12 +61,45 @@ class ResolveBudgetContractTests(unittest.TestCase):
 
     def test_both_scans_share_one_horizon(self) -> None:
         # 두 값이 갈리면 뒤엣것이 앞엣것이 이미 본 행을 다시 걷거나, 앞엣것이 본 행을
-        # 뒤엣것이 못 본다.
+        # 뒤엣것이 못 본다. 값 자체는 계약이 아니다 — **하나라는 것**이 계약이다.
         source = RESOLVER.read_text(encoding="utf-8")
-        self.assertIn("private static let chatListResolveHorizon = 200", source)
+        self.assertEqual(source.count("private static let chatListResolveHorizon"), 1)
         body = _open_chat_list_row_body(source)
         self.assertIn("limit: titleScanHorizon", body)
         self.assertNotIn("limit: 200", body)
+
+    def test_the_horizon_reaches_past_the_chat_list(self) -> None:
+        # 지평선이 목록보다 짧으면 그 아래 방은 chat-id 로 원리적으로 못 찾고, 못 찾은
+        # 해석은 이름 검색으로 떨어진다 — 동명이인이면 카톡이 아무 방이나 열어주고,
+        # 검색어 잔재가 목록 필터로 GUI 에 남아 뒤이은 모든 실행을 물려받는다
+        # (2026-08-09 09:50 UTC: rows=1 이 153회 연속, 수신 10분 전면 정지).
+        # 200 으로 굳어 있던 동안 프로덕션 목록이 264행이라 상시 64행이 그 아래였고,
+        # 10분 표본에서 res.rows=200(지평선 소진) 5건과 res.search 5건이 짝을 이뤘다.
+        # 기본값은 브릿지의 스캔 지평선(KMSG_CHAT_SCAN_LIMIT, 500)과 맞춘다.
+        source = RESOLVER.read_text(encoding="utf-8")
+        self.assertIn('environment["KMSG_CHAT_RESOLVE_HORIZON"]', source)
+        self.assertIn("return 500", source)
+
+    def test_the_walk_itself_is_cut_by_the_budget(self) -> None:
+        # 지평선이 목록보다 짧던 동안에는 walk 최악값이 지평선에 묶여 스캔 **앞**에서만
+        # 끊어도 됐다. 지평선을 목록 길이까지 열면 그 상한이 같이 풀리므로(500행이면
+        # 기본 예산 8초를 넘긴다) 안쪽에도 끊을 자리가 있어야 한다. 두 call site 모두다 —
+        # 탭 복구(⌘2) 경로가 빠지면 그 경로만 예산 밖에서 돈다.
+        body = _open_chat_list_row_body(RESOLVER.read_text(encoding="utf-8"))
+        self.assertEqual(body.count("shouldStop: { deadline.isExceeded }"), 2)
+
+    def test_the_title_miss_reason_is_recorded(self) -> None:
+        # 프로덕션 10분 표본에서 res.rows 가 151·160·200 처럼 서로 다른 방에서 같은
+        # 값으로 반복됐다 — 방이 깊은 것이 아니라 walk 가 소진된 것이고, 그 구간이 해석
+        # 비용의 30%다. 원인(말줄임된 제목? 낡은 displayName? 지평선?)을 요약 줄로만
+        # 답할 수 있다. 제목 문자열 자체는 남기지 않는다 — 이 줄은 API 파드 로그로
+        # 흘러가고 방 제목은 사용자의 표시 이름이다.
+        source = RESOLVER.read_text(encoding="utf-8")
+        self.assertIn('note("res.miss"', source)
+        self.assertIn('note("res.idx"', source)
+        for kind in ['"norm"', '"trunc"', '"diff"', '"absent"']:
+            self.assertIn(kind, source)
+        self.assertNotIn('note("res.miss", query)', source)
 
     def test_budget_is_checked_between_every_blocking_scan(self) -> None:
         # 스캔 한 번은 통째로 블로킹이라 중간에 못 끊는다. 끊을 수 있는 자리는 스캔과

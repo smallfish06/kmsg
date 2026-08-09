@@ -127,7 +127,26 @@ struct ChatWindowResolver {
     /// 채팅 목록에서 chat-id 해석이 훑는 행 수. 제목 훑기와 레지스트리 스캔이 **같은**
     /// 값을 써야 한다 — 다르면 뒤엣것이 앞엣것이 이미 본 행을 다시 걷거나, 앞엣것이
     /// 본 행을 뒤엣것이 못 본다.
-    private static let chatListResolveHorizon = 200
+    ///
+    /// **이 지평선이 목록보다 짧으면 그 아래 방은 chat-id 로 원리적으로 못 찾는다.**
+    /// 못 찾은 해석은 이름 검색으로 떨어지는데, 검색은 (a) 동명이인이면 카톡이 아무 방이나
+    /// 열어주고 (b) 검색어가 목록 필터로 GUI 에 남아 뒤이은 모든 실행을 물려받게 한다
+    /// (2026-08-09 09:50 UTC: rows=1 이 153회 연속, 10분간 수신 전면 정지). 200 으로
+    /// 굳어 있던 동안 프로덕션 목록이 264행이라 상시 64행이 그 아래였고, 10분 표본에서
+    /// `res.rows=200`(지평선 소진) 5건과 `res.search` 5건이 정확히 짝을 이뤘다.
+    ///
+    /// 기본값은 브릿지의 스캔 지평선(`KMSG_CHAT_SCAN_LIMIT`, 500)과 맞춘다 — 브릿지가
+    /// 보는 방은 해석도 볼 수 있어야 한다. 목록이 길어져 walk 가 늘어나는 대가는
+    /// `ResolveDeadline` 이 문다(scanUntilTitle 이 25행마다 예산을 확인한다).
+    private static let chatListResolveHorizon: Int = {
+        if let raw = ProcessInfo.processInfo.environment["KMSG_CHAT_RESOLVE_HORIZON"],
+           let rows = Int(raw),
+           rows > 0
+        {
+            return rows
+        }
+        return 500
+    }()
 
     private let kakao: KakaoTalkApp
     private let runner: AXActionRunner
@@ -603,20 +622,24 @@ struct ChatWindowResolver {
         // scanUntilTitle 은 걸으면서 스냅샷을 모으고 제목이 맞으면 거기서 멈추므로,
         // 적중은 예전처럼 몇 행에서 끝나고 미스는 walk 가 절반이 된다.
         //
-        // 스캔 한 번은 통째로 블로킹이라 중간에 못 끊는다(스캐너까지 deadline 을 내리면
-        // 행마다 시계를 보게 된다). 그래서 끊는 자리는 스캔 **앞**뿐이다 — 실측에서 이
-        // 목록 구간 하나가 33.02s 를 쓴 적이 있고, 8초 예산도 그건 못 막는다.
+        // 끊는 자리는 스캔 앞과 스캔 안 두 곳이다. 지평선이 목록보다 짧던 동안에는 walk
+        // 최악값이 지평선에 묶여 앞에서만 끊어도 됐지만, 지평선을 목록 길이까지 열면 그
+        // 상한이 같이 풀린다. scanUntilTitle 이 25행마다 예산을 확인한다(행마다가 아니다).
         guard !deadline.isExceeded else {
             runner.log("chat_id: \(deadline.describe("the chat list scan"))")
             return nil
         }
-        var (titleMatch, snapshots) = scanner.scanUntilTitle(
+        var (titleMatch, snapshots, stoppedEarly) = scanner.scanUntilTitle(
             query,
             in: chatListWindow,
             limit: titleScanHorizon,
+            shouldStop: { deadline.isExceeded },
             trace: { message in runner.log(message) }
         )
         note("res.rows", String(snapshots.count))
+        if stoppedEarly {
+            note("res.cut", "1")
+        }
         if let titleMatch {
             runner.log("chat_id: matched row by title '\(query)'")
             return openMatchedRow(titleMatch, query: query, in: chatListWindow, fallbackWindow: fallbackWindow)
@@ -641,6 +664,7 @@ struct ChatWindowResolver {
                 query,
                 in: chatListWindow,
                 limit: titleScanHorizon,
+                shouldStop: { deadline.isExceeded },
                 trace: { message in runner.log(message) }
             )
             if let recoveredMatch = recovered.match {
@@ -660,13 +684,45 @@ struct ChatWindowResolver {
         // 합쳐도 판정은 둘 다 남긴다.
         let assignedIDs = registry.assignChatIDs(for: snapshots.map(\.discovery))
         guard let matchIndex = assignedIDs.firstIndex(of: chatID) else {
+            note("res.miss", "absent")
             runner.log("chat_id: no visible chat row matched \(chatID) in top \(snapshots.count) rows")
             return nil
         }
 
         let row = snapshots[matchIndex].element
+        note("res.miss", Self.titleMissKind(expected: query, found: snapshots[matchIndex].discovery.title))
+        note("res.idx", String(matchIndex + 1))
         runner.log("chat_id: matched row title='\(snapshots[matchIndex].discovery.title)'")
         return openMatchedRow(row, query: query, in: chatListWindow, fallbackWindow: fallbackWindow)
+    }
+
+    /// 제목 fast path 가 빗나간 이유를 한 낱말로 요약한다.
+    ///
+    /// 여기까지 왔다는 것은 목록을 끝까지 걷고도 제목이 안 맞았고, 그 뒤 chat id 판정이
+    /// 방을 찾았다는 뜻이다. 프로덕션 10분 표본에서 `res.rows` 가 151·160·200 처럼 서로
+    /// 다른 방에서 **같은 값**으로 반복됐다 — 방이 깊은 곳에 있는 것이 아니라 walk 가
+    /// 소진된 것이고, 그 구간이 해석 비용의 30%다. 원인을 모르면 고칠 수 없는데 브릿지는
+    /// `--trace-ax` 없이 돌아 runner.log 가 안 보이므로, 요약 줄에 실을 수 있는 형태로
+    /// 남긴다.
+    ///
+    /// 제목 자체는 남기지 않는다 — 이 줄은 API 파드 로그로 흘러가고 방 제목은 사용자의
+    /// 표시 이름이다. 원인을 가르는 데 필요한 것은 문자열이 아니라 **어긋난 방식**이다.
+    ///
+    /// - `norm`: 정규화하면 같다 (공백·문장부호·대소문자 차이)
+    /// - `trunc`: 한쪽이 다른 쪽의 접두사다 (창 폭에 따라 말줄임된 제목이 유력한 가설)
+    /// - `diff`: 아예 다른 문자열 (레지스트리의 displayName 이 낡았다는 뜻)
+    /// - `absent`: id 판정도 못 찾았다 (걸은 행 안에 그 방이 없다 — 지평선/스캔 문제)
+    private static func titleMissKind(expected: String, found: String) -> String {
+        if expected == found { return "none" }
+        let expectedKey = ChatTextNormalizer.normalizeForMatch(expected)
+        let foundKey = ChatTextNormalizer.normalizeForMatch(found)
+        if expectedKey == foundKey { return "norm" }
+        if !expectedKey.isEmpty, !foundKey.isEmpty,
+           expectedKey.hasPrefix(foundKey) || foundKey.hasPrefix(expectedKey)
+        {
+            return "trunc"
+        }
+        return "diff"
     }
 
     private func openMatchedRow(
