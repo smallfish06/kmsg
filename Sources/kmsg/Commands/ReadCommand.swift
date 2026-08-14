@@ -215,6 +215,13 @@ struct ReadCommand: ParsableCommand {
                 )
             }
             profiler.note("rows", String(snapshot.count))
+            // The bridge only sees this summary line (not runner.log), so the
+            // count of side-judgment failures must ride here: unattributed>0
+            // means author fields from this read are not trustworthy verdicts.
+            profiler.note(
+                "unattributed",
+                String(snapshot.messages.filter { $0.authorSource == "unattributed" }.count)
+            )
         } catch TranscriptReadError.transcriptContextUnavailable {
             // A missing transcript area is a real failure (wrong/blank window) —
             // in JSON mode report it as an error so callers don't mistake it for

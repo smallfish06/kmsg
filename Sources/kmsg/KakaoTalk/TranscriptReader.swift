@@ -9,6 +9,12 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
     let linkCount: Int
     let attachmentCount: Int
     let isSystem: Bool
+    /// How `author` was decided ("explicit"/"default-me"/"left-chain"/
+    /// "left-unresolved"/"left-time-guard"/"unattributed"/...). "unattributed"
+    /// means the side judgment itself failed (missing AX frames on a
+    /// half-rendered window) — author nil there is NOT a "(me)" verdict, and
+    /// consumers must not anchor or gate on such rows (talkfriend 2026-08-14).
+    let authorSource: String?
     let logicalTimestamp: Date?
     /// Calendar date of the message ("YYYY-MM-DD"), read from the time
     /// label's AXHelp tooltip. nil when the tooltip was unavailable.
@@ -32,6 +38,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case author
+        case authorSource = "author_source"
         case timeRaw = "time_raw"
         case body
         case date
@@ -46,6 +53,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
 
     init(
         author: String?,
+        authorSource: String? = nil,
         timeRaw: String?,
         body: String,
         imageCount: Int = 0,
@@ -59,6 +67,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         imageSHA256: [String]? = nil
     ) {
         self.author = author
+        self.authorSource = authorSource
         self.timeRaw = timeRaw
         self.body = body
         self.imageCount = max(0, imageCount)
@@ -75,6 +84,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(author ?? "(me)", forKey: .author)
+        try container.encodeIfPresent(authorSource, forKey: .authorSource)
         try container.encodeIfPresent(timeRaw, forKey: .timeRaw)
         try container.encode(body, forKey: .body)
         try container.encodeIfPresent(date, forKey: .date)
@@ -90,6 +100,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
     func withCapturedImages(paths: [String], sha256: [String]) -> TranscriptMessage {
         TranscriptMessage(
             author: author,
+            authorSource: authorSource,
             timeRaw: timeRaw,
             body: body,
             imageCount: imageCount,
@@ -508,6 +519,7 @@ struct KakaoTalkTranscriptReader {
 
             let message = TranscriptMessage(
                 author: author,
+                authorSource: resolvedAuthor.source,
                 timeRaw: resolvedTime,
                 body: bodyCandidate.body,
                 imageCount: analysis.imageCount,
@@ -729,6 +741,9 @@ struct KakaoTalkTranscriptReader {
             messages.append(
                 TranscriptMessage(
                     author: metadata.author,
+                    // The fallback extractor has no side information at all, so
+                    // a nil author here is the same non-verdict as side unknown.
+                    authorSource: metadata.author == nil ? "unattributed" : "fallback-metadata",
                     timeRaw: metadata.timeRaw,
                     body: resolved,
                     linkCount: countURLTokens(in: resolved),
@@ -752,6 +767,7 @@ struct KakaoTalkTranscriptReader {
                     messages.append(
                         TranscriptMessage(
                             author: nil,
+                            authorSource: "unattributed",
                             timeRaw: nil,
                             body: title,
                             linkCount: max(1, countURLTokens(in: title)),
@@ -1039,8 +1055,17 @@ struct KakaoTalkTranscriptReader {
             return (explicitAuthor, "explicit")
         }
 
-        if analysis.side == .right || analysis.side == .unknown {
+        if analysis.side == .right {
             return (nil, "default-me")
+        }
+
+        // side == .unknown means the AX frames needed for the side judgment
+        // were missing (typically a half-rendered window right after a failed
+        // read). That is a non-verdict, not "ours": folding it into default-me
+        // misattributed 39/50 rows and lost user messages downstream
+        // (talkfriend 2026-08-14). Keep author nil but mark it distinguishable.
+        if analysis.side == .unknown {
+            return (nil, "unattributed")
         }
 
         guard let anchorAuthor = leftAnchorAuthor else {
