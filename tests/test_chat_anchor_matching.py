@@ -5,8 +5,10 @@
 없도록 떼어 놨으므로 파일 하나만 컴파일해 돌릴 수 있다.
 """
 
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -69,8 +71,20 @@ class ChatAnchorMatchingTests(unittest.TestCase):
             main = Path(tmp) / "main.swift"
             main.write_text(HARNESS, encoding="utf-8")
             binary = Path(tmp) / "anchorcheck"
+            # The open-source toolchain (CI's setup-swift) does not default to
+            # the macOS SDK the way Xcode's swiftc does; a bare `swiftc` there
+            # dies with "did you forget to set an SDK". Resolve it explicitly.
+            sdk_args = []
+            if sys.platform == "darwin" and not os.environ.get("SDKROOT"):
+                sdk = subprocess.run(
+                    ["xcrun", "--sdk", "macosx", "--show-sdk-path"],
+                    capture_output=True,
+                    text=True,
+                )
+                if sdk.returncode == 0 and sdk.stdout.strip():
+                    sdk_args = ["-sdk", sdk.stdout.strip()]
             build = subprocess.run(
-                ["swiftc", "-O", str(CHAT_ANCHOR), str(main), "-o", str(binary)],
+                ["swiftc", "-O", *sdk_args, str(CHAT_ANCHOR), str(main), "-o", str(binary)],
                 capture_output=True,
                 text=True,
             )
