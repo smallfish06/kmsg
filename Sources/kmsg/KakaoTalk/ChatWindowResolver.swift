@@ -1237,10 +1237,26 @@ struct ChatWindowResolver {
         if let fastWindow = resolveOpenedChatWindowFast(query: query) {
             return fastWindow
         }
-        let opened = kakao.focusedWindow?.title ?? fallbackWindow.title ?? ""
+        let focused = kakao.focusedWindow
+        let opened = focused?.title ?? fallbackWindow.title ?? ""
         if !opened.isEmpty, !titleMatchesExactly(query: query, candidate: opened) {
             runner.log("[\(ChatWindowFailureCode.wrongWindow.rawValue)] opened window '\(opened)' does not match '\(query)'; not using it")
             note("res.wrong", "1")
+            // 무엇을 열었는지의 **종류**만 요약 줄에 남긴다 (제목은 사용자 표시 이름이라 안 적는다).
+            // 브릿지 Mac 은 runner.log 를 못 보는데, 2026-08-16 새벽 행 열기 사다리(AXPress→
+            // 선택+Enter)를 넣고도 res.open 이 한 번도 안 찍혔다 — 행이 별도 창이 아니라
+            // 목록 창 안의 패널로 열리는지(list+input), 아무것도 안 열리는지(list, 입력창 없음),
+            // 다른 창이 앞에 있는지(other)를 이 키로 가른다.
+            //   list  : 열린(포커스) 창이 목록 창 그 자체
+            //   other : 목록 창도 아니고 제목도 다른 창
+            // 뒤에 붙는 +input 은 그 창에 채팅 입력창(AXTextArea 등)이 있다는 뜻이다.
+            let isListWindow = focused == nil
+                || (focused?.title != nil && focused?.title == fallbackWindow.title)
+                || (focused?.frame != nil && focused?.frame == fallbackWindow.frame)
+            let probe = focused ?? fallbackWindow
+            let hasInput = windowContainsLikelyChatInput(probe)  // 진단 표기일 뿐 창을 받지 않는다
+            note("res.wrongkind", (isListWindow ? "list" : "other") + (hasInput ? "+input" : ""))
+            note("res.wins", String(kakao.windows.count))
         }
         return nil
     }
