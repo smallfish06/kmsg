@@ -824,6 +824,13 @@ struct ChatWindowResolver {
                 note("res.open", "press-late")
                 return true
             }
+            // **Enter 는 포커스가 있는 곳으로 간다.** 브릿지 Mac 의 목록 창 트리(2026-08-16 08:56
+            // KST `kmsg inspect`)에서 검색창(AXTextField)이 focused 였다 — 검색 폴백이 한 번
+            // 돌면 그 포커스가 검색창에 남고, 다음 행 열기의 Enter 는 빈 검색을 확정할 뿐 행을
+            // 열지 않는다 → 다시 검색 폴백 → 포커스가 또 남는 자가 고리. 정상 read/send 의
+            // 46% 가 이 고리에 있었고 res.open=enter 는 포커스가 마침 표에 있던 때만 났다.
+            // 그래서 검색창(또는 아무 텍스트 필드)이 포커스면 표/행으로 옮긴 뒤 친다.
+            moveFocusOffTextFieldToRow(row, in: chatListWindow)
             runner.pressEnterKey()
             didTriggerAction = true
             if runner.waitUntil(
@@ -840,6 +847,32 @@ struct ChatWindowResolver {
         }
 
         return didTriggerAction
+    }
+
+    /// 포커스가 텍스트 필드(검색창)에 있으면 행 → 표 순으로 옮긴다. 옮겼는지는 포커스 요소의
+    /// 역할로 확인한다 — 못 옮기면 그대로 Enter 를 치는 대신 로그만 남긴다(빈 검색 확정은
+    /// 무해하고, 그 뒤 검색 폴백이 어차피 받는다).
+    private func moveFocusOffTextFieldToRow(_ row: UIElement, in chatListWindow: UIElement) {
+        let focusedRole = kakao.applicationElement.focusedUIElement?.role
+        guard focusedRole == kAXTextFieldRole || focusedRole == kAXTextAreaRole else { return }
+        runner.log("chat_id: focus is on a text field (\(focusedRole ?? "?")); moving it to the chat list before Enter")
+        var targets: [UIElement] = [row]
+        if let parent = row.parent { targets.append(parent) }
+        if let table = chatListWindow.findAll(where: { $0.role == kAXTableRole || $0.role == kAXOutlineRole }, limit: 1, maxNodes: 60).first {
+            targets.append(table)
+        }
+        for target in targets {
+            do { try target.focus() } catch { continue }
+            if runner.waitUntil(label: "chat list focus", timeout: 0.15, pollInterval: 0.03, evaluateAfterTimeout: true, condition: {
+                let role = kakao.applicationElement.focusedUIElement?.role
+                return role != kAXTextFieldRole && role != kAXTextAreaRole
+            }) {
+                note("res.refocus", "1")
+                return
+            }
+        }
+        runner.log("chat_id: could not move focus off the text field; Enter may confirm an empty search instead")
+        note("res.refocus", "0")
     }
 
     private func standardizeReadableWindow(_ window: UIElement, label: String) {

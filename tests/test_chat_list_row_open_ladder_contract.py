@@ -48,6 +48,19 @@ class ChatListRowOpenLadderContractTests(unittest.TestCase):
         enter_index = body.index("runner.pressEnterKey()")
         self.assertLess(raise_index, enter_index)
 
+    def test_enter_moves_focus_off_the_search_field_first(self) -> None:
+        # 2026-08-16 08:56 KST bridge Mac `kmsg inspect`: the list window's search
+        # AXTextField was focused, so Enter confirmed an empty search instead of
+        # opening the selected row — the search fallback leaves that focus behind,
+        # which is why 46% of resolves looped through it.
+        body = self._body("private func triggerChatListRowOpen(", "private func moveFocusOffTextFieldToRow")
+        move_index = body.index("moveFocusOffTextFieldToRow(row, in: chatListWindow)")
+        enter_index = body.index("runner.pressEnterKey()")
+        self.assertLess(move_index, enter_index)
+        helper = self._body("private func moveFocusOffTextFieldToRow(", "private func standardizeReadableWindow")
+        self.assertIn("kAXTextFieldRole", helper)
+        self.assertIn('note("res.refocus", "1")', helper)
+
     def test_no_double_click_on_list_rows(self) -> None:
         body = self._body("private func triggerChatListRowOpen(", "private func standardizeReadableWindow")
         self.assertNotIn("mouseDoubleClick", body)
