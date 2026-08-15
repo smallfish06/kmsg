@@ -738,7 +738,7 @@ struct ChatWindowResolver {
         kakao.activate()
         _ = tryRaiseWindow(chatListWindow)
 
-        if triggerChatListRowOpen(row) {
+        if triggerChatListRowOpen(row, in: chatListWindow, opened: { resolveOpenedChatWindowFast(query: query) != nil }) {
             if let window = waitForOpenedChatWindow(query: query, fallbackWindow: fallbackWindow) {
                 return window
             }
@@ -748,23 +748,71 @@ struct ChatWindowResolver {
         return nil
     }
 
-    private func triggerChatListRowOpen(_ row: UIElement) -> Bool {
+    /// 목록 행을 열 때도 검색 결과와 같은 **사다리**를 탄다 — 한 단을 밟고 창이 떴는지
+    /// 짧게 확인한 뒤에야 다음 단으로 간다.
+    ///
+    /// 종전에는 AXPress 가 "지원됨"으로 답하면 그걸로 끝이었고, 창이 안 뜨면 그대로 3초를
+    /// 기다리다 WRONG_WINDOW → 검색으로 떨어졌다. 브릿지 Mac 에서는 그 경로가 정상
+    /// read/send 의 **46%** 였다(2026-08-16 00:30~02:30 KST 173건 중 79건, 전부
+    /// `res.list=3.09` — 대기 만료값 — 뒤 `res.search=2.2` 로 성공). 즉 그 Mac 의 목록
+    /// 행은 AXPress 를 받되 **선택만 하고 열지는 않는다**(개발 Mac 의 행은 AXPress 자체를
+    /// 지원하지 않아 처음부터 선택+Enter 로 열리고 0.3s 에 뜬다). 검색으로 구제되는 방은
+    /// 3~5초 손해로 끝나지만, **기호뿐인 제목은 검색창이 받지 못하므로**('.', '☆・・・・・☆')
+    /// 그 방들은 read/send 가 100% 죽었다 — 2026-08-16 02:15 KST 답장 3회 실패.
+    ///
+    /// 더블클릭은 여기 넣지 않는다. 검색 결과는 화면에 보이지만 목록 행은 147번째일 수
+    /// 있어 클릭 좌표가 남의 행일 수 있다 — 제목 검증이 뒤에서 잡겠지만 굳이 남의 방을
+    /// 열 이유가 없다. Enter 는 목록 창을 방금 올렸으므로(activate + raise) 선택된 행을
+    /// 연다. 어느 단이 열었는지 `res.open` 로 남긴다 — 브릿지는 runner.log 를 못 본다.
+    static let rowOpenConfirmTimeout: TimeInterval = 0.4
+
+    private func triggerChatListRowOpen(_ row: UIElement, in chatListWindow: UIElement, opened: () -> Bool) -> Bool {
+        var didTriggerAction = false
+
         if tryActivateSearchResult(row, label: "chat list row") {
-            return true
+            didTriggerAction = true
+            if runner.waitUntil(
+                label: "chat list row open confirm (press)",
+                timeout: Self.rowOpenConfirmTimeout,
+                pollInterval: 0.05,
+                evaluateAfterTimeout: false,
+                condition: opened
+            ) {
+                note("res.open", "press")
+                return true
+            }
+            runner.log("chat_id: AXPress on the row did not open a chat window; trying select+Enter")
         }
 
-        let selected = trySelectSearchResult(row, label: "chat list row")
-        if !selected, let parent = row.parent, trySelectSearchResult(parent, label: "chat list row.parent") {
-            runner.pressEnterKey()
-            return true
+        var selected = trySelectSearchResult(row, label: "chat list row")
+        if !selected, let parent = row.parent {
+            selected = trySelectSearchResult(parent, label: "chat list row.parent")
         }
-
         if selected {
+            // AXPress 가 늦게 창을 열었을 수 있다 — 그 창이 키 윈도우면 Enter 가 그 입력창으로
+            // 간다. 목록 창을 다시 올린 뒤에도 안 열려 있을 때만 친다.
+            kakao.activate()
+            _ = tryRaiseWindow(chatListWindow)
+            if opened() {
+                note("res.open", "press-late")
+                return true
+            }
             runner.pressEnterKey()
-            return true
+            didTriggerAction = true
+            if runner.waitUntil(
+                label: "chat list row open confirm (enter)",
+                timeout: Self.rowOpenConfirmTimeout,
+                pollInterval: 0.05,
+                evaluateAfterTimeout: false,
+                condition: opened
+            ) {
+                note("res.open", "enter")
+                return true
+            }
+            runner.log("chat_id: select+Enter on the row did not open a chat window within \(Self.rowOpenConfirmTimeout)s")
         }
 
-        return false
+        return didTriggerAction
     }
 
     private func standardizeReadableWindow(_ window: UIElement, label: String) {
