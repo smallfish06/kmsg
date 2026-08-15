@@ -1264,6 +1264,48 @@ struct ChatWindowResolver {
     /// 입력창보다 위, 패널 상단 띠 안(전사 행은 헤더 아래에서 시작한다), 그리고 조상에
     /// 행/셀/표가 없다(목록 행·전사 행은 전부 행 안에 있다). 하나라도 어긋나면 nil — 그러면
     /// 종전대로 WRONG_WINDOW → 검색이다. 틀린 방을 여는 것보다 못 여는 게 낫다.
+    /// 목록 창 안의 채팅 입력창을 **패널 쪽에서부터** 찾는다. 창 루트에서 BFS 로 걸으면 왼쪽
+    /// 목록(행 361개와 그 자식들)이 예산을 다 먹고 오른쪽 패널의 입력창에 못 닿는다 —
+    /// v1.260816.2 첫 표본이 `res.wrongkind=list`(입력창 못 찾음) 였다. 창의 직속 자식 중
+    /// 오른쪽에 있는(=패널) 것들부터 걷고, 그래도 없으면 창 전체를 예산 안에서 한 번 더 본다.
+    private func findListPaneInput(
+        in listWindow: UIElement,
+        windowFrame: CGRect,
+        isInput: (UIElement) -> Bool
+    ) -> UIElement? {
+        let splitX = windowFrame.minX + windowFrame.width * 0.3
+        var rightSide: [UIElement] = []
+        var queue = listWindow.children
+        var depth = 0
+        // 두 단계까지 내려가며 오른쪽 프레임을 가진 컨테이너를 모은다 (패널이 그룹 한두 겹
+        // 아래에 있을 수 있다).
+        while depth < 3, !queue.isEmpty {
+            var next: [UIElement] = []
+            for child in queue {
+                if let frame = child.frame {
+                    if frame.minX >= splitX, frame.width >= windowFrame.width * 0.3 {
+                        rightSide.append(child)
+                        continue
+                    }
+                    if frame.width >= windowFrame.width * 0.6 {
+                        next.append(contentsOf: child.children)  // 전폭 컨테이너: 안으로
+                    }
+                } else {
+                    next.append(contentsOf: child.children)
+                }
+            }
+            queue = next
+            depth += 1
+        }
+        for container in rightSide {
+            if isInput(container) { return container }
+            if let found = container.findAll(where: isInput, limit: 1, maxNodes: 600).first {
+                return found
+            }
+        }
+        return listWindow.findAll(where: isInput, limit: 1, maxNodes: 900).first
+    }
+
     private func verifiedListPaneTitle(query: String, in listWindow: UIElement) -> String? {
         guard let windowFrame = listWindow.frame else { return nil }
         // 입력창 찾기는 **예산 안에서만** 한다 — 목록 창은 행 361개짜리 표를 품고 있어 무제한
@@ -1280,9 +1322,12 @@ struct ChatWindowResolver {
         {
             input = focusedElement
         } else {
-            input = listWindow.findAll(where: isInput, limit: 1, maxNodes: 700).first
+            input = findListPaneInput(in: listWindow, windowFrame: windowFrame, isInput: isInput)
         }
-        guard let input, let inputFrame = input.frame else { return nil }
+        guard let input, let inputFrame = input.frame else {
+            note("res.pane", "noinput")
+            return nil
+        }
 
         // 입력창의 조상 중 창 대비 45%×35% 이상인 가장 작은 것 = 패널 (MessageContextResolver 와 같은 규칙).
         var paneRoot: UIElement = listWindow
@@ -1324,6 +1369,7 @@ struct ChatWindowResolver {
             runner.log("chat_id: list pane header matches '\(query)'; accepting the list window as the chat window")
             return candidate
         }
+        note("res.pane", texts.isEmpty ? "notext" : "nohdr")
         return nil
     }
 
@@ -1375,9 +1421,11 @@ struct ChatWindowResolver {
                 || (focused?.frame != nil && focused?.frame == fallbackWindow.frame)
             // 진단 표기일 뿐 창을 받지 않는다. 예산을 둔다 — 목록 창 전체 걷기는 15~20초였다.
             let probe = focused ?? fallbackWindow
-            let hasInput = probe.findAll(where: { element in
-                isLikelyMessageInputElement(element, in: probe) && element.role != kAXTextFieldRole
-            }, limit: 1, maxNodes: 700).first != nil
+            let hasInput = probe.frame.flatMap { probeFrame in
+                findListPaneInput(in: probe, windowFrame: probeFrame) { element in
+                    isLikelyMessageInputElement(element, in: probe) && element.role != kAXTextFieldRole
+                }
+            } != nil
             note("res.wrongkind", (isListWindow ? "list" : "other") + (hasInput ? "+input" : ""))
             note("res.wins", String(kakao.windows.count))
         }
