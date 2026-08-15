@@ -62,6 +62,14 @@ class ChatWindowExactTitleContractTests(unittest.TestCase):
         self.assertNotIn("normalizeSearchToken", body)
         self.assertNotIn("hasPrefix", body)
 
+    def test_parenthesis_tail_tolerance_requires_whitespace(self) -> None:
+        # talkfriend users carry a connect code with no space ('박세은(5292)'). A tail
+        # regex that also strips that would let a plain '박세은' query take that window —
+        # a different person. Only KakaoTalk's own " (3)" style tail is tolerated.
+        body = self._body("private func titleMatchesExactly", "private func findMatchingChatWindow")
+        self.assertIn(r'#"\s+\(\d+\)\s*$"#', body)
+        self.assertNotIn(r'#"\s*\(\d+\)\s*$"#', body)
+
 
 if __name__ == "__main__":
     unittest.main()

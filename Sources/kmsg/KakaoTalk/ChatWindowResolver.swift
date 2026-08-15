@@ -1420,11 +1420,15 @@ struct ChatWindowResolver {
         let rhs = ChatTextNormalizer.normalizeForMatch(candidate)
         guard !lhs.isEmpty else { return false }
         if lhs == rhs { return true }
-        // 창 제목에는 목록 제목에 없는 꼬리가 붙을 수 있다 — 단톡의 멤버 수 "(3)" 같은 것.
+        // 창 제목에는 목록 제목에 없는 꼬리가 붙을 수 있다 — 단톡의 멤버 수 " (3)" 같은 것.
         // 그 꼬리만 벗긴 값의 완전 일치는 받는다. 접두 일치가 아니다: '하린' 대 '하린이' 는
         // 여전히 다르다.
+        //
+        // **공백 뒤의 괄호만 꼬리다.** talkfriend 유저는 표시이름 끝에 연결 코드를 붙인다
+        // ('박세은(5292)', 공백 없음). 그걸 꼬리로 벗기면 '박세은' 요청이 '박세은(5292)' 창을
+        // 잡는다 — 다른 사람이다. 카톡이 붙이는 수는 이름과 띄어 쓴다.
         let trimmedCandidate = candidate.replacingOccurrences(
-            of: #"\s*\(\d+\)\s*$"#, with: "", options: .regularExpression
+            of: #"\s+\(\d+\)\s*$"#, with: "", options: .regularExpression
         )
         return trimmedCandidate != candidate && lhs == ChatTextNormalizer.normalizeForMatch(trimmedCandidate)
     }
