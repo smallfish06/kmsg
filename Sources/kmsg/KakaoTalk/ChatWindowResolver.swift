@@ -762,18 +762,10 @@ struct ChatWindowResolver {
 
         // 행은 두 가지 모양으로 열린다 — 별도 창(제목 = 방 제목) 또는 목록 창 안의 패널
         // (창 제목은 그대로 '카카오톡', 방 제목은 패널 헤더에). 둘 다 열림으로 친다.
-        let opened: () -> Bool = { [self] in
-            if resolveOpenedChatWindowFast(query: query) != nil { return true }
-            if let paneTitle = verifiedListPaneTitle(query: query, in: chatListWindow) {
-                acceptedListPaneTitle = paneTitle
-                return true
-            }
-            return false
-        }
+        // 패널 확인은 폴마다 돌리지 않는다 — 한 번에 1~2초라 3s 대기가 9.5s 가 됐다
+        // (v1.260816.3 실측). 제목 창 대기가 만료된 뒤 **한 번만** 본다.
+        let opened: () -> Bool = { [self] in resolveOpenedChatWindowFast(query: query) != nil }
         if triggerChatListRowOpen(row, in: chatListWindow, opened: opened) {
-            if acceptedListPaneTitle != nil {
-                return chatListWindow
-            }
             if let window = waitForOpenedChatWindow(query: query, fallbackWindow: fallbackWindow, listPaneWindow: chatListWindow) {
                 return window
             }
@@ -1241,16 +1233,15 @@ struct ChatWindowResolver {
             evaluateAfterTimeout: false
         ) {
             resolved = resolveOpenedChatWindowFast(query: query)
-            if resolved == nil, let listPaneWindow,
-               let paneTitle = verifiedListPaneTitle(query: query, in: listPaneWindow)
-            {
-                acceptedListPaneTitle = paneTitle
-                note("res.open", "pane")
-                resolved = listPaneWindow
-            }
             return resolved != nil
         }
-        return resolved ?? resolveOpenedChatWindow(query: query, fallbackWindow: fallbackWindow)
+        if let resolved { return resolved }
+        if let listPaneWindow, let paneTitle = verifiedListPaneTitle(query: query, in: listPaneWindow) {
+            acceptedListPaneTitle = paneTitle
+            note("res.open", "pane")
+            return listPaneWindow
+        }
+        return resolveOpenedChatWindow(query: query, fallbackWindow: fallbackWindow)
     }
 
     /// 목록 창 안 **패널**의 헤더 제목. 넓은 목록 창에서는 행이 별도 창을 띄우지 않고 오른쪽
