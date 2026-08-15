@@ -1136,9 +1136,23 @@ struct ChatWindowResolver {
         return deduplicateSearchCandidates(results)
     }
 
+    /// 행/검색 결과를 연 뒤 제목이 맞는 창이 뜰 때까지 기다린다.
+    ///
+    /// 종전 0.8s 는 "제목이 없어도 포커스된 창을 받는" 폴백이 뒤에 있을 때의 값이었다.
+    /// 그 폴백을 없애자(WRONG_WINDOW) 브릿지 Mac 에서는 새 창의 제목이 그 안에 채워지지
+    /// 않아 정상 read/send 의 절반이 WRONG_WINDOW → 검색(+2s) 으로 돌아 성공했다
+    /// (2026-08-16 00:02~00:10 KST 실측: ok 62건 중 res.wrong=1, resolve 0.3s→3s). 제목이
+    /// 채워지면 즉시 반환하므로 여유를 길게 잡아도 빠른 창엔 비용이 없다.
+    static let openedWindowTitleTimeout: TimeInterval = 3.0
+
     private func waitForOpenedChatWindow(query: String, fallbackWindow: UIElement) -> UIElement? {
         var resolved: UIElement?
-        _ = runner.waitUntil(label: "chat context ready", timeout: 0.8, pollInterval: 0.05, evaluateAfterTimeout: false) {
+        _ = runner.waitUntil(
+            label: "chat context ready",
+            timeout: Self.openedWindowTitleTimeout,
+            pollInterval: 0.05,
+            evaluateAfterTimeout: false
+        ) {
             resolved = resolveOpenedChatWindowFast(query: query)
             return resolved != nil
         }

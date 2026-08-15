@@ -71,5 +71,16 @@ class ChatWindowExactTitleContractTests(unittest.TestCase):
         self.assertNotIn(r'#"\s*\(\d+\)\s*$"#', body)
 
 
+    def test_opened_window_wait_outlives_title_population(self) -> None:
+        # Without the title-blind fallback, 0.8s was too short for the bridge Mac to
+        # populate a new window's title: half of the successful reads went WRONG_WINDOW
+        # -> search (+2s). The wait returns as soon as the title matches, so a longer
+        # ceiling costs nothing on fast windows.
+        self.assertIn("static let openedWindowTitleTimeout: TimeInterval = 3.0", self.source)
+        body = self._body("private func waitForOpenedChatWindow", "private func resolveOpenedChatWindowFast")
+        self.assertIn("timeout: Self.openedWindowTitleTimeout", body)
+        self.assertNotIn("timeout: 0.8", body)
+
+
 if __name__ == "__main__":
     unittest.main()
