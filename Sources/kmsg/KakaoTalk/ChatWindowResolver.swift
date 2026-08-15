@@ -1236,13 +1236,21 @@ struct ChatWindowResolver {
             return resolved != nil
         }
         if let resolved { return resolved }
-        if let listPaneWindow, let paneTitle = verifiedListPaneTitle(query: query, in: listPaneWindow) {
+        // 패널 헤더 확인은 **끈다** (`listPaneAcceptanceEnabled`). 브릿지 Mac 실측(v1.260816.2~4)
+        // 에서 목록 창 안에 채팅 입력창이 예산 안에서 한 번도 안 잡혔고(res.pane=noinput,
+        // res.wins=1), 프로브 비용만 detour 당 +1.2~2.7s 였다. 켜기 전에 그 Mac 의
+        // `kmsg inspect` 로 목록 창 트리를 확인해 입력창·헤더의 실제 위치를 봐야 한다.
+        if Self.listPaneAcceptanceEnabled, let listPaneWindow,
+           let paneTitle = verifiedListPaneTitle(query: query, in: listPaneWindow)
+        {
             acceptedListPaneTitle = paneTitle
             note("res.open", "pane")
             return listPaneWindow
         }
         return resolveOpenedChatWindow(query: query, fallbackWindow: fallbackWindow)
     }
+
+    static let listPaneAcceptanceEnabled = false
 
     /// 목록 창 안 **패널**의 헤더 제목. 넓은 목록 창에서는 행이 별도 창을 띄우지 않고 오른쪽
     /// 패널에 열린다 — 창 제목은 '카카오톡' 그대로라 제목 매칭이 원리적으로 안 되고, 5d5c946
@@ -1410,14 +1418,9 @@ struct ChatWindowResolver {
             let isListWindow = focused == nil
                 || (focused?.title != nil && focused?.title == fallbackWindow.title)
                 || (focused?.frame != nil && focused?.frame == fallbackWindow.frame)
-            // 진단 표기일 뿐 창을 받지 않는다. 예산을 둔다 — 목록 창 전체 걷기는 15~20초였다.
-            let probe = focused ?? fallbackWindow
-            let hasInput = probe.frame.flatMap { probeFrame in
-                findListPaneInput(in: probe, windowFrame: probeFrame) { element in
-                    isLikelyMessageInputElement(element, in: probe) && element.role != kAXTextFieldRole
-                }
-            } != nil
-            note("res.wrongkind", (isListWindow ? "list" : "other") + (hasInput ? "+input" : ""))
+            // 입력창 유무(+input)는 더 안 잰다 — 목록 창 걷기가 예산을 둬도 1.2s 이상이고
+            // v1.260816.1~4 로 이미 답을 얻었다(무제한 걷기로는 +input, 예산 안에서는 noinput).
+            note("res.wrongkind", isListWindow ? "list" : "other")
             note("res.wins", String(kakao.windows.count))
         }
         return nil
