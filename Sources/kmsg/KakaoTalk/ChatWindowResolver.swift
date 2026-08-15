@@ -48,6 +48,11 @@ private enum ChatWindowFailureCode: String {
     case windowNotReady = "WINDOW_NOT_READY"
     case searchMiss = "SEARCH_MISS"
     case resolveBudget = "RESOLVE_BUDGET"
+    /// 방을 열긴 했는데 그 창의 제목이 요청한 방이 아니다. 종전에는 이 상황에서 포커스된
+    /// 창/폴백 창/메인 창 중 채팅 입력창이 있는 아무 창을 돌려줬다 — 그게 남의 방을 읽고
+    /// 남의 방에 보내는 경로였다(2026-08-15 talkfriend: 목록 재정렬 사이에 다른 유저의
+    /// 창을 읽어 그 유저의 톡이 남의 대화에 섞였다). 이제는 실패다.
+    case wrongWindow = "WRONG_WINDOW"
 }
 
 /// resolve 전체에 걸리는 시간 예산.
@@ -301,8 +306,7 @@ struct ChatWindowResolver {
         }
 
         if let focusedWindow = kakao.focusedWindow,
-           let title = focusedWindow.title,
-           scoreQueryMatch(query: query, candidateText: title) > 0
+           titleMatchesExactly(query: query, candidate: focusedWindow.title)
         {
             runner.log("background-safe: matched already focused chat window")
             return ChatWindowResolution(window: focusedWindow, method: .existingWindow)
@@ -1106,7 +1110,11 @@ struct ChatWindowResolver {
                     textLimit: profile.textLimit,
                     textNodeBudget: profile.textNodeBudget
                 )
-                guard matchScore > 0, let matchedText else { continue }
+                // 검색 결과도 제목이 완전히 같은 행만 받는다. 카톡 검색은 부분일치·대화
+                // 내용까지 결과에 섞어 주는데, 그중 "가장 점수 높은 것"을 여는 것은 대상 방이
+                // 없을 때(리네임·나감) 남의 방을 여는 것과 같다. 대상이 없으면 SEARCH_MISS 가
+                // 맞는 결과다 — 브릿지는 그 코드로 리네임 복구를 시작한다.
+                guard matchScore > 0, let matchedText, titleMatchesExactly(query: query, candidate: matchedText) else { continue }
                 let activationCandidate = activationTarget(for: candidate)
                 // Capture the click coordinate now, while the handle is valid.
                 let clickPoint = centerPoint(of: candidate.frame) ?? centerPoint(of: activationCandidate.frame)
@@ -1143,8 +1151,7 @@ struct ChatWindowResolver {
         }
 
         if let focusedWindow = kakao.focusedWindow,
-           let title = focusedWindow.title,
-           scoreQueryMatch(query: query, candidateText: title) > 0
+           titleMatchesExactly(query: query, candidate: focusedWindow.title)
         {
             return focusedWindow
         }
@@ -1152,27 +1159,27 @@ struct ChatWindowResolver {
         return nil
     }
 
+    /// 열린 창을 제목으로만 확정한다. **제목이 안 맞으면 없는 것이다.**
+    ///
+    /// 종전의 3~5단계 — 포커스된 창, 폴백 창, 메인 창 중 "채팅 입력창이 있는" 아무 창 —
+    /// 는 "어떻게든 성공시키자"였고, 그 성공은 남의 방이었다. 2026-08-15 20:57 KST
+    /// (talkfriend): 목록 행 클릭 뒤 제목 매칭이 안 돼 13초를 기다리다 그때 열려 있던
+    /// 다른 유저의 창을 돌려줬고, 그 유저의 톡이 남의 대화로 들어가 캐릭터가 답장했으며
+    /// 서버는 방 제목을 그 유저 이름으로 갈아치웠다. `res.rows=2 res.list=13.46` 로 남은
+    /// 그 read 는 `status=ok` 였다 — 실패가 성공으로 기록되는 것이 이 폴백의 정확한 해악이다.
+    ///
+    /// 실패는 호출자가 다음 사다리(검색)나 에러로 넘긴다. 무엇을 열었는지는 로그에 남긴다 —
+    /// 브릿지가 못 보는 runner.log 이지만, WRONG_WINDOW 실패의 요약 줄에 `res.wrong` 로도
+    /// 실어 사후 추적이 되게 한다.
     private func resolveOpenedChatWindow(query: String, fallbackWindow: UIElement) -> UIElement? {
         if let fastWindow = resolveOpenedChatWindowFast(query: query) {
             return fastWindow
         }
-
-        if let matchedWindow = findMatchingChatWindow(in: kakao.windows, query: query) {
-            return matchedWindow
+        let opened = kakao.focusedWindow?.title ?? fallbackWindow.title ?? ""
+        if !opened.isEmpty, !titleMatchesExactly(query: query, candidate: opened) {
+            runner.log("[\(ChatWindowFailureCode.wrongWindow.rawValue)] opened window '\(opened)' does not match '\(query)'; not using it")
+            note("res.wrong", "1")
         }
-
-        if let focusedWindow = kakao.focusedWindow, windowContainsLikelyChatInput(focusedWindow) {
-            return focusedWindow
-        }
-
-        if windowContainsLikelyChatInput(fallbackWindow) {
-            return fallbackWindow
-        }
-
-        if let mainWindow = kakao.mainWindow, windowContainsLikelyChatInput(mainWindow) {
-            return mainWindow
-        }
-
         return nil
     }
 
@@ -1397,17 +1404,33 @@ struct ChatWindowResolver {
         return actions.contains(action)
     }
 
+    /// 방 신원은 **완전 일치**로만 판정한다.
+    ///
+    /// `scoreQueryMatch` 는 접두·포함·경칭 변형에도 점수를 주는 검색용 점수다. 그걸 창
+    /// 매칭에 쓰면 '하린' 요청이 열려 있는 '차하린'/'류하린' 창을 잡는다(2026-08-15
+    /// talkfriend 계정에 하린이 넷이었다). 요청 쪽 query 는 언제나 방의 정확한 표시 제목
+    /// (레지스트리 displayName 또는 목록 행 제목)이므로 느슨할 이유가 없다.
+    ///
+    /// 정규화는 레지스트리와 같은 `normalizeForMatch` 다 — 기호뿐인 제목('.', '~.~')을
+    /// 빈 문자열로 만들지 않는다. `normalizeSearchToken` 은 기호를 벗겨서 '.' 방의 점수가
+    /// 항상 0 이었고, 그 방은 매번 아래 폴백으로 떨어져 아무 창이나 읽었다.
+    private func titleMatchesExactly(query: String, candidate: String?) -> Bool {
+        guard let candidate else { return false }
+        let lhs = ChatTextNormalizer.normalizeForMatch(query)
+        let rhs = ChatTextNormalizer.normalizeForMatch(candidate)
+        guard !lhs.isEmpty else { return false }
+        if lhs == rhs { return true }
+        // 창 제목에는 목록 제목에 없는 꼬리가 붙을 수 있다 — 단톡의 멤버 수 "(3)" 같은 것.
+        // 그 꼬리만 벗긴 값의 완전 일치는 받는다. 접두 일치가 아니다: '하린' 대 '하린이' 는
+        // 여전히 다르다.
+        let trimmedCandidate = candidate.replacingOccurrences(
+            of: #"\s*\(\d+\)\s*$"#, with: "", options: .regularExpression
+        )
+        return trimmedCandidate != candidate && lhs == ChatTextNormalizer.normalizeForMatch(trimmedCandidate)
+    }
+
     private func findMatchingChatWindow(in windows: [UIElement], query: String) -> UIElement? {
-        windows.compactMap { window -> (window: UIElement, score: Int)? in
-            guard let title = window.title else { return nil }
-            let score = scoreQueryMatch(query: query, candidateText: title)
-            guard score > 0 else { return nil }
-            return (window, score)
-        }
-        .max(by: { lhs, rhs in
-            lhs.score < rhs.score
-        })?
-        .window
+        windows.first { window in titleMatchesExactly(query: query, candidate: window.title) }
     }
 
     private func bestQueryMatch(

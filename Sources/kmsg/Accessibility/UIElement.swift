@@ -254,6 +254,24 @@ public final class UIElement: @unchecked Sendable {
         return UIElement(axParent)
     }
 
+    /// The window this element lives in — AXWindow when the app exposes it, else the
+    /// nearest AXWindow ancestor. nil when neither is reachable.
+    public var owningWindow: UIElement? {
+        if let axWindow: AXUIElement = attributeOptional(kAXWindowAttribute) {
+            return UIElement(axWindow)
+        }
+        var cursor: UIElement? = self
+        var hops = 0
+        while let current = cursor, hops < 40 {
+            if current.role == kAXWindowRole {
+                return current
+            }
+            cursor = current.parent
+            hops += 1
+        }
+        return nil
+    }
+
     public var children: [UIElement] {
         guard let axChildren: [AXUIElement] = attributeOptional(kAXChildrenAttribute) else {
             return []

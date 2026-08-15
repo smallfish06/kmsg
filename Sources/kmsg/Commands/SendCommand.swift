@@ -65,6 +65,10 @@ struct SendCommand: ParsableCommand {
         case inputNotReflected = "INPUT_NOT_REFLECTED"
         case enterNotEffective = "ENTER_NOT_EFFECTIVE"
         case forcedTypingFailed = "FORCED_TYPING_FAILED"
+        /// 입력창 후보가 있긴 한데 전부 다른 창 소속이다 — 방 창은 맞게 골랐어도 그 창에
+        /// 입력창이 안 잡히면 실패다. 종전에는 포커스된 창/앱 전체의 입력창을 점수로 골라
+        /// 남의 방에 칠 수 있었다.
+        case inputOutsideChatWindow = "INPUT_OUTSIDE_CHAT_WINDOW"
     }
 
     var recipient: String? {
@@ -495,6 +499,9 @@ struct SendCommand: ParsableCommand {
             rememberCachedElement(slot: .messageInput, root: chatWindow, element: input, runner: runner)
             return input
         }
+        if !appCandidates.isEmpty {
+            runner.log("[\(SendFailureCode.inputOutsideChatWindow.rawValue)] \(appCandidates.count) input candidate(s) found but none inside chat window '\(chatWindow.title ?? "")'")
+        }
         return nil
     }
 
@@ -559,6 +566,13 @@ struct SendCommand: ParsableCommand {
         Thread.sleep(forTimeInterval: 0.12)
 
         _ = runner.focusWithVerification(chatWindow, label: "chat window fallback", attempts: 1)
+        // 블라인드 타이핑은 **지금 포커스된 창이 그 방 창일 때만** 한다. 키 이벤트는
+        // 프론트모스트 창으로 가므로, 다른 창이 앞에 있으면 이 메시지는 그 창(=남의 방)에
+        // 쳐지고 종전 코드는 그걸 "✓ sent (forced typing fallback)" 로 보고했다.
+        guard let focused = kakao.focusedWindow, areSameAXElement(focused, chatWindow) else {
+            runner.log("fallback: focused window is not the resolved chat window ('\(kakao.focusedWindow?.title ?? "")' vs '\(chatWindow.title ?? "")'); refusing to type blind")
+            return false
+        }
         runner.log("fallback: typing into active chat window")
         _ = runner.typeTextWithVerification(message, on: nil, label: "forced typing", attempts: 1)
         runner.pressEnterKey()
@@ -579,8 +593,17 @@ struct SendCommand: ParsableCommand {
         return false
     }
 
+    /// 후보는 **해석된 방 창 소속**만 남긴다. 후보 수집은 포커스된 창·앱 전체까지 넓게
+    /// 하는데(창이 덜 그려졌을 때 필요), 그 넓힘이 곧 남의 창 입력창을 데려온다 — 카톡
+    /// 채팅창들은 화면에서 거의 같은 자리에 겹쳐 뜨므로 프레임 포함 검사(-6000)로는 못
+    /// 가른다. 소속 창을 못 알아내는 후보(AXWindow 도 조상도 없음)는 버린다: 모르는 것을
+    /// 통과시키는 것이 오늘까지의 모양이었다.
     private func pickMessageInputField(from fields: [UIElement], in window: UIElement) -> UIElement? {
-        fields.sorted { lhs, rhs in
+        let inWindow = fields.filter { field in
+            guard let owner = field.owningWindow else { return false }
+            return areSameAXElement(owner, window)
+        }
+        return inWindow.sorted { lhs, rhs in
             let lhsScore = scoreMessageInputCandidate(lhs, in: window)
             let rhsScore = scoreMessageInputCandidate(rhs, in: window)
             return lhsScore > rhsScore

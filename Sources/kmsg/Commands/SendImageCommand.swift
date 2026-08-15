@@ -164,6 +164,17 @@ struct SendImageCommand: ParsableCommand {
         try? window.focus()
         Thread.sleep(forTimeInterval: 0.3)
 
+        // ⌘V 는 프론트모스트 창으로 간다. 해석된 방 창이 실제로 포커스를 못 잡았으면
+        // 붙여넣기는 그때 앞에 있는 창(=남의 방)에 들어간다 — 그 뒤의 확인 시트 탐색은
+        // `window` 안에서 하므로 시트를 못 보고 "direct-send path" 로 성공 처리된다.
+        // 포커스가 그 창이 아니면 여기서 멈춘다.
+        let focusedNow = kakao.focusedWindow
+        guard let focusedNow, CFEqual(focusedNow.axElement, window.axElement) else {
+            throw KakaoTalkError.actionFailed(
+                "[WRONG_WINDOW] chat window '\(window.title ?? "")' did not take focus (focused: '\(focusedNow?.title ?? "")'); refusing to paste"
+            )
+        }
+
         // 3. Paste image
         runner.pressPaste()
         runner.log("Paste command sent")
