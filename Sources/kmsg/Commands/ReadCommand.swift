@@ -210,8 +210,9 @@ struct ReadCommand: ParsableCommand {
             snapshot = try profiler.phase("read") {
                 try transcriptReader.readSnapshot(
                     from: window,
-                    fallbackChatTitle: window.title ?? requestedChat,
-                    limit: limit
+                    fallbackChatTitle: resolution.effectiveChatTitle ?? requestedChat,
+                    limit: limit,
+                    chatTitleOverride: resolution.chatTitle
                 )
             }
             profiler.note("rows", String(snapshot.count))

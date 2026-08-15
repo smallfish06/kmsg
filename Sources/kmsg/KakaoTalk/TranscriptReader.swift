@@ -165,7 +165,8 @@ struct KakaoTalkTranscriptReader {
         from window: UIElement,
         fallbackChatTitle: String,
         limit: Int,
-        includeSystemMessages: Bool = false
+        includeSystemMessages: Bool = false,
+        chatTitleOverride: String? = nil
     ) throws -> TranscriptSnapshot {
         let referenceDate = Date()
         let messageContextResolver = MessageContextResolver(
@@ -183,7 +184,8 @@ struct KakaoTalkTranscriptReader {
             fallbackChatTitle: fallbackChatTitle,
             limit: limit,
             includeSystemMessages: includeSystemMessages,
-            referenceDate: referenceDate
+            referenceDate: referenceDate,
+            chatTitleOverride: chatTitleOverride
         )
     }
 
@@ -193,7 +195,8 @@ struct KakaoTalkTranscriptReader {
         fallbackChatTitle: String,
         limit: Int,
         includeSystemMessages: Bool = false,
-        referenceDate: Date = Date()
+        referenceDate: Date = Date(),
+        chatTitleOverride: String? = nil
     ) throws -> TranscriptSnapshot {
 
         let frameCache = FrameCache()
@@ -220,7 +223,8 @@ struct KakaoTalkTranscriptReader {
         }
 
         return TranscriptSnapshot(
-            chat: chatWindow.title ?? fallbackChatTitle,
+            // 목록 창 패널로 읽었으면 창 제목('카카오톡')이 아니라 확인한 헤더 제목이 방 제목이다.
+            chat: chatTitleOverride ?? chatWindow.title ?? fallbackChatTitle,
             fetchedAt: referenceDate,
             messages: displayMessages,
             transcriptFrame: context.transcriptRoot.frame

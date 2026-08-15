@@ -20,6 +20,9 @@ enum ChatWindowLayoutMode: String {
 enum ChatWindowResolutionMethod {
     case existingWindow
     case openedViaChatList
+    /// 목록 창이 넓어 행이 별도 창이 아니라 **목록 창 안의 패널**로 열렸고, 그 패널의 헤더
+    /// 제목이 완전일치해 목록 창을 채팅 창으로 받은 경우. `chatTitle` 이 그 헤더 제목이다.
+    case openedInListPane
     case openedViaSearch
 }
 
@@ -31,6 +34,14 @@ enum ChatWindowInteractionMode {
 struct ChatWindowResolution {
     let window: UIElement
     let method: ChatWindowResolutionMethod
+    /// 창 제목이 방 제목이 아닐 때(목록 창 패널) 실제로 확인한 방 제목. 나머지 경로는 nil —
+    /// 그때는 `window.title` 이 곧 방 제목이다.
+    var chatTitle: String? = nil
+
+    /// read/send 가 결과에 적고 브릿지가 대조하는 방 제목.
+    var effectiveChatTitle: String? {
+        chatTitle ?? window.title
+    }
 
     var openedViaSearch: Bool {
         method == .openedViaSearch
@@ -163,6 +174,13 @@ struct ChatWindowResolver {
     /// --trace-ax 없이는 안 보이는데 브릿지는 그 플래그 없이 돌아서, resolve 가 어디서
     /// 시간을 썼는지 프로덕션에서 답할 수 있는 창구가 여기뿐이다.
     private let note: (String, String) -> Void
+    /// 목록 창 패널로 열렸을 때 확인한 헤더 제목. struct 라 참조 상자로 든다.
+    private final class PaneAcceptance { var title: String? }
+    private let paneAcceptance = PaneAcceptance()
+    private var acceptedListPaneTitle: String? {
+        get { paneAcceptance.title }
+        nonmutating set { paneAcceptance.title = newValue }
+    }
 
     init(
         kakao: KakaoTalkApp,
@@ -246,6 +264,9 @@ struct ChatWindowResolver {
             noteSeconds("res.list", deadline.elapsed - listStart)
             if let chatWindow {
                 standardizeReadableWindow(chatWindow, label: "opened chat window")
+                if let paneTitle = acceptedListPaneTitle {
+                    return ChatWindowResolution(window: chatWindow, method: .openedInListPane, chatTitle: paneTitle)
+                }
                 return ChatWindowResolution(window: chatWindow, method: .openedViaChatList)
             }
         }
@@ -737,9 +758,23 @@ struct ChatWindowResolver {
     ) -> UIElement? {
         kakao.activate()
         _ = tryRaiseWindow(chatListWindow)
+        acceptedListPaneTitle = nil
 
-        if triggerChatListRowOpen(row, in: chatListWindow, opened: { resolveOpenedChatWindowFast(query: query) != nil }) {
-            if let window = waitForOpenedChatWindow(query: query, fallbackWindow: fallbackWindow) {
+        // 행은 두 가지 모양으로 열린다 — 별도 창(제목 = 방 제목) 또는 목록 창 안의 패널
+        // (창 제목은 그대로 '카카오톡', 방 제목은 패널 헤더에). 둘 다 열림으로 친다.
+        let opened: () -> Bool = { [self] in
+            if resolveOpenedChatWindowFast(query: query) != nil { return true }
+            if let paneTitle = verifiedListPaneTitle(query: query, in: chatListWindow) {
+                acceptedListPaneTitle = paneTitle
+                return true
+            }
+            return false
+        }
+        if triggerChatListRowOpen(row, in: chatListWindow, opened: opened) {
+            if acceptedListPaneTitle != nil {
+                return chatListWindow
+            }
+            if let window = waitForOpenedChatWindow(query: query, fallbackWindow: fallbackWindow, listPaneWindow: chatListWindow) {
                 return window
             }
         }
@@ -1193,7 +1228,11 @@ struct ChatWindowResolver {
     /// 채워지면 즉시 반환하므로 여유를 길게 잡아도 빠른 창엔 비용이 없다.
     static let openedWindowTitleTimeout: TimeInterval = 3.0
 
-    private func waitForOpenedChatWindow(query: String, fallbackWindow: UIElement) -> UIElement? {
+    private func waitForOpenedChatWindow(
+        query: String,
+        fallbackWindow: UIElement,
+        listPaneWindow: UIElement? = nil
+    ) -> UIElement? {
         var resolved: UIElement?
         _ = runner.waitUntil(
             label: "chat context ready",
@@ -1202,9 +1241,90 @@ struct ChatWindowResolver {
             evaluateAfterTimeout: false
         ) {
             resolved = resolveOpenedChatWindowFast(query: query)
+            if resolved == nil, let listPaneWindow,
+               let paneTitle = verifiedListPaneTitle(query: query, in: listPaneWindow)
+            {
+                acceptedListPaneTitle = paneTitle
+                note("res.open", "pane")
+                resolved = listPaneWindow
+            }
             return resolved != nil
         }
         return resolved ?? resolveOpenedChatWindow(query: query, fallbackWindow: fallbackWindow)
+    }
+
+    /// 목록 창 안 **패널**의 헤더 제목. 넓은 목록 창에서는 행이 별도 창을 띄우지 않고 오른쪽
+    /// 패널에 열린다 — 창 제목은 '카카오톡' 그대로라 제목 매칭이 원리적으로 안 되고, 5d5c946
+    /// 이전 코드는 그 창을 "채팅 입력창이 있는 창"으로 제목 확인 없이 받았다(그게 김수림 사고:
+    /// 패널이 남의 방을 보여주고 있었다). 브릿지 Mac 실측(2026-08-16 03:20 KST v1.260816.1):
+    /// `res.wrongkind=list+input res.wins=3` — 열린 것은 목록 창이고 그 안에 입력창이 있다.
+    ///
+    /// 그래서 **헤더 제목이 완전일치할 때만** 목록 창을 받는다. 헤더를 목록 행·전사 행의 같은
+    /// 문자열과 가르는 조건이 넷이다 — 입력창과 같은 세로 열(가로 겹침: 목록은 왼쪽 열이다),
+    /// 입력창보다 위, 패널 상단 띠 안(전사 행은 헤더 아래에서 시작한다), 그리고 조상에
+    /// 행/셀/표가 없다(목록 행·전사 행은 전부 행 안에 있다). 하나라도 어긋나면 nil — 그러면
+    /// 종전대로 WRONG_WINDOW → 검색이다. 틀린 방을 여는 것보다 못 여는 게 낫다.
+    private func verifiedListPaneTitle(query: String, in listWindow: UIElement) -> String? {
+        guard let windowFrame = listWindow.frame else { return nil }
+        // 입력창 찾기는 **예산 안에서만** 한다 — 목록 창은 행 361개짜리 표를 품고 있어 무제한
+        // 걷기는 15~20초다 (v1.260816.1 의 진단 findFirst 가 그랬다: res.list=15.86/18.33/20.07).
+        // 방을 열면 카톡이 입력창에 포커스를 주므로 포커스 요소를 먼저 본다.
+        let isInput: (UIElement) -> Bool = { element in
+            isLikelyMessageInputElement(element, in: listWindow) && element.role != kAXTextFieldRole
+        }
+        var input: UIElement? = nil
+        if let focusedElement = kakao.applicationElement.focusedUIElement,
+           isInput(focusedElement),
+           let focusedFrame = focusedElement.frame,
+           isElementLikelyInsideWindow(elementFrame: focusedFrame, windowFrame: windowFrame)
+        {
+            input = focusedElement
+        } else {
+            input = listWindow.findAll(where: isInput, limit: 1, maxNodes: 700).first
+        }
+        guard let input, let inputFrame = input.frame else { return nil }
+
+        // 입력창의 조상 중 창 대비 45%×35% 이상인 가장 작은 것 = 패널 (MessageContextResolver 와 같은 규칙).
+        var paneRoot: UIElement = listWindow
+        var paneArea = CGFloat.greatestFiniteMagnitude
+        var cursor = input.parent
+        var hops = 0
+        while let candidate = cursor, hops < 8 {
+            if let frame = candidate.frame,
+               frame.width / max(windowFrame.width, 1) >= 0.45,
+               frame.height / max(windowFrame.height, 1) >= 0.35,
+               frame.width * frame.height < paneArea
+            {
+                paneRoot = candidate
+                paneArea = frame.width * frame.height
+            }
+            cursor = candidate.parent
+            hops += 1
+        }
+        guard let paneFrame = paneRoot.frame else { return nil }
+        let headerBandMaxY = paneFrame.minY + max(80, paneFrame.height * 0.15)
+
+        let rowishRoles: Set<String> = [kAXRowRole, kAXCellRole, kAXTableRole, kAXOutlineRole, kAXListRole]
+        let texts = paneRoot.findAll(where: { $0.role == kAXStaticTextRole }, limit: 60, maxNodes: 600)
+        for text in texts {
+            guard let frame = text.frame else { continue }
+            guard frame.minY < inputFrame.minY, frame.minY <= headerBandMaxY else { continue }
+            guard frame.maxX > inputFrame.minX, frame.minX < inputFrame.maxX else { continue }
+            let candidate = text.stringValue ?? text.title ?? text.axDescription
+            guard let candidate, titleMatchesExactly(query: query, candidate: candidate) else { continue }
+            var ancestor = text.parent
+            var insideRow = false
+            var up = 0
+            while let node = ancestor, up < 8 {
+                if let role = node.role, rowishRoles.contains(role) { insideRow = true; break }
+                ancestor = node.parent
+                up += 1
+            }
+            if insideRow { continue }
+            runner.log("chat_id: list pane header matches '\(query)'; accepting the list window as the chat window")
+            return candidate
+        }
+        return nil
     }
 
     private func resolveOpenedChatWindowFast(query: String) -> UIElement? {
@@ -1253,8 +1373,11 @@ struct ChatWindowResolver {
             let isListWindow = focused == nil
                 || (focused?.title != nil && focused?.title == fallbackWindow.title)
                 || (focused?.frame != nil && focused?.frame == fallbackWindow.frame)
+            // 진단 표기일 뿐 창을 받지 않는다. 예산을 둔다 — 목록 창 전체 걷기는 15~20초였다.
             let probe = focused ?? fallbackWindow
-            let hasInput = windowContainsLikelyChatInput(probe)  // 진단 표기일 뿐 창을 받지 않는다
+            let hasInput = probe.findAll(where: { element in
+                isLikelyMessageInputElement(element, in: probe) && element.role != kAXTextFieldRole
+            }, limit: 1, maxNodes: 700).first != nil
             note("res.wrongkind", (isListWindow ? "list" : "other") + (hasInput ? "+input" : ""))
             note("res.wins", String(kakao.windows.count))
         }

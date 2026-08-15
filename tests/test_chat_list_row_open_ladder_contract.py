@@ -62,5 +62,49 @@ class ChatListRowOpenLadderContractTests(unittest.TestCase):
         self.assertIn("resolveOpenedChatWindowFast(query: query) != nil", body)
 
 
+class ChatListPaneAcceptanceContractTests(unittest.TestCase):
+    """A wide chat-list window opens rows as an in-window pane, not a titled window.
+
+    2026-08-16 03:20 KST (bridge Mac, v1.260816.1 diagnostics): every WRONG_WINDOW
+    read logged `res.wrongkind=list+input res.wins=3` — the focused window was the
+    chat-list window itself and it contained a message input. The pre-5d5c946
+    resolver accepted that window title-blind (and once read another user's pane).
+
+    The list window may be accepted only when the pane HEADER title matches the
+    query exactly, and the header must be told apart from list rows / transcript
+    rows carrying the same string; the read result must then report the header
+    title as `chat`, not the window title."""
+
+    def setUp(self) -> None:
+        self.source = RESOLVER.read_text(encoding="utf-8")
+        self.body = self.source.split("private func verifiedListPaneTitle(", 1)[1].split("\n    private func ", 1)[0]
+
+    def test_header_match_is_exact(self) -> None:
+        self.assertIn("titleMatchesExactly(query: query, candidate: candidate)", self.body)
+        self.assertNotIn("scoreQueryMatch", self.body)
+
+    def test_header_is_separated_from_rows_by_geometry_and_ancestry(self) -> None:
+        # above the input, in the input's column, in the top band, not inside a row/cell/table
+        self.assertIn("frame.minY < inputFrame.minY", self.body)
+        self.assertIn("frame.maxX > inputFrame.minX", self.body)
+        self.assertIn("headerBandMaxY", self.body)
+        self.assertIn("kAXRowRole", self.body)
+        self.assertIn("kAXTableRole", self.body)
+
+    def test_input_lookup_is_budgeted(self) -> None:
+        # An unbounded walk of the 361-row list window took 15-20s (v1.260816.1).
+        self.assertNotIn("findFirst(", self.body)
+        self.assertIn("maxNodes:", self.body)
+
+    def test_pane_resolution_carries_its_own_chat_title(self) -> None:
+        self.assertIn("case openedInListPane", self.source)
+        self.assertIn("var chatTitle: String? = nil", self.source)
+        self.assertIn("method: .openedInListPane, chatTitle: paneTitle", self.source)
+        reader = (REPO_ROOT / "Sources" / "kmsg" / "KakaoTalk" / "TranscriptReader.swift").read_text(encoding="utf-8")
+        self.assertIn("chat: chatTitleOverride ?? chatWindow.title ?? fallbackChatTitle", reader)
+        read_cmd = (REPO_ROOT / "Sources" / "kmsg" / "Commands" / "ReadCommand.swift").read_text(encoding="utf-8")
+        self.assertIn("chatTitleOverride: resolution.chatTitle", read_cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
