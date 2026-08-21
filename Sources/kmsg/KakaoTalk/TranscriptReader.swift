@@ -18,7 +18,9 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
     /// How `timeRaw` was decided. "explicit" = this row carries its own time
     /// label; "group-tail" = inherited from the next stamped row on the same
     /// side (KakaoTalk labels only the LAST bubble of a same-minute run, so
-    /// the earlier bubbles of a burst have no label of their own); "prev-side"
+    /// the earlier bubbles of a burst have no label of their own);
+    /// "tail-unknown" = inherited from the nearest later labelled row whose
+    /// side could not be measured (second choice); "prev-side"
     /// / "prev-any" = the old backward guess from an earlier row, kept only as
     /// a last resort — it is what stamped a burst's leading bubbles with the
     /// previous sender's minute (talkfriend 2026-08-14~21: 66% of ">5min late"
@@ -439,7 +441,7 @@ struct KakaoTalkTranscriptReader {
             runner.log("read: row analysis early stop after \(reversedAnalyses.count)/\(rowsToAnalyze.count) rows")
         }
         let analyses = Array(reversedAnalyses.reversed())
-        let groupTailTimes = resolveGroupTailTimes(analyses)
+        let groupTails = resolveGroupTailStamps(analyses)
 
         var messages: [TranscriptMessage] = []
         messages.reserveCapacity(min(analyses.count, limit * 2))
@@ -508,7 +510,11 @@ struct KakaoTalkTranscriptReader {
             if let axHelpDate = analysis.axHelpDate {
                 lastKnownDate = axHelpDate
             }
-            let resolvedDate = analysis.axHelpDate ?? lastKnownDate
+            // The tooltip date rides the time label, i.e. the run's LAST bubble,
+            // so an unlabelled bubble's day is on the tail row too. Falling back
+            // to the previous row's day stamped a just-after-midnight burst with
+            // yesterday's date (talkfriend: ~1 row/day arriving "24h late").
+            let resolvedDate = analysis.axHelpDate ?? groupTails[offset]?.date ?? lastKnownDate
 
             if analysis.isSystemLikeRow {
                 let message = TranscriptMessage(
@@ -549,9 +555,9 @@ struct KakaoTalkTranscriptReader {
                 if side != .unknown {
                     lastTimeBySide[side] = explicitTime
                 }
-            } else if let tailTime = groupTailTimes[offset] {
-                resolvedTime = tailTime
-                timeSource = "group-tail"
+            } else if let tail = groupTails[offset] {
+                resolvedTime = tail.time
+                timeSource = tail.source
             } else if side != .unknown, let sideTime = lastTimeBySide[side] {
                 resolvedTime = sideTime
                 timeSource = "prev-side"
@@ -593,34 +599,53 @@ struct KakaoTalkTranscriptReader {
         return messages
     }
 
-    /// For every unlabelled message row, the time of the next labelled row on
-    /// the same side, walking bottom-up. A run ends at a system row (date
-    /// separator) or at a labelled row of the opposite side — KakaoTalk
-    /// labels the last bubble before a sender change, so an unlabelled bubble
-    /// followed by the other sender's labelled bubble is a label we failed to
-    /// read, not a group continuation; inheriting across it would be a guess
-    /// in the wrong direction too. Unknown-side rows neither carry nor break
-    /// a run: without a frame there is no way to tell which run they belong
-    /// to, so they fall through to the caller's backward fallback.
-    private func resolveGroupTailTimes(_ analyses: [RowAnalysis]) -> [String?] {
-        var tailTimes = [String?](repeating: nil, count: analyses.count)
-        var carry: [MessageSide: String] = [:]
+    /// For every unlabelled message row, the stamp (time + tooltip date) of the
+    /// next labelled row on the same side, walking bottom-up. A run ends at a
+    /// system row (date separator) or at a labelled row of the opposite side —
+    /// KakaoTalk labels the last bubble before a sender change, so an
+    /// unlabelled bubble followed by the other sender's labelled bubble is a
+    /// label we failed to read, not a group continuation; inheriting across it
+    /// would be a guess in the wrong direction too.
+    ///
+    /// A labelled row whose side could not be measured (no AX frame — typical
+    /// for the newest bubble on a window that is still drawing) cannot delimit
+    /// a run, but it is still the nearest later label, so it serves as a
+    /// second-choice tail ("tail-unknown") until a labelled row with a known
+    /// side supersedes it. Without it the burst's leading bubbles fell back to
+    /// the previous run's minute and, when the user repeated the same text,
+    /// the server folded the new message as a replay (talkfriend 2026-08-22
+    /// 00:32, re-observed 3096s). Unlabelled unknown-side rows get nothing
+    /// here and fall through to the caller's backward fallback.
+    private func resolveGroupTailStamps(_ analyses: [RowAnalysis]) -> [GroupTailStamp?] {
+        var stamps = [GroupTailStamp?](repeating: nil, count: analyses.count)
+        var carry: [MessageSide: (time: String, date: String?)] = [:]
+        var carryUnknown: (time: String, date: String?)?
         for index in stride(from: analyses.count - 1, through: 0, by: -1) {
             let analysis = analyses[index]
             if analysis.isSystemLikeRow {
                 carry.removeAll()
+                carryUnknown = nil
                 continue
             }
             let side = analysis.side
-            guard side != .unknown else { continue }
             if let explicitTime = analysis.timeRaw {
-                carry[side] = explicitTime
-                carry[side == .left ? .right : .left] = nil
-            } else if let tailTime = carry[side] {
-                tailTimes[index] = tailTime
+                if side == .unknown {
+                    carryUnknown = (explicitTime, analysis.axHelpDate)
+                } else {
+                    carry[side] = (explicitTime, analysis.axHelpDate)
+                    carry[side == .left ? .right : .left] = nil
+                    carryUnknown = nil
+                }
+                continue
+            }
+            guard side != .unknown else { continue }
+            if let tail = carry[side] {
+                stamps[index] = GroupTailStamp(time: tail.time, date: tail.date, source: "group-tail")
+            } else if let tail = carryUnknown {
+                stamps[index] = GroupTailStamp(time: tail.time, date: tail.date, source: "tail-unknown")
             }
         }
-        return tailTimes
+        return stamps
     }
 
     private func directRowChildren(from element: UIElement) -> [UIElement] {
@@ -1510,6 +1535,12 @@ private struct RowMetadata {
 private struct MessageBodyCandidate {
     let body: String
     let frame: CGRect?
+}
+
+private struct GroupTailStamp {
+    let time: String
+    let date: String?
+    let source: String
 }
 
 private struct RowAnalysis {

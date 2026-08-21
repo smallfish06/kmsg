@@ -33,18 +33,18 @@ class ReadTimeInheritanceContractTests(unittest.TestCase):
 
     def parse_body(self) -> str:
         return self.reader_source.split("private func parseMessages", 1)[1].split(
-            "private func resolveGroupTailTimes", 1
+            "private func resolveGroupTailStamps", 1
         )[0]
 
     def tail_pass_body(self) -> str:
-        return self.reader_source.split("private func resolveGroupTailTimes", 1)[1].split(
+        return self.reader_source.split("private func resolveGroupTailStamps", 1)[1].split(
             "private func", 1
         )[0]
 
     def test_group_tail_wins_over_backward_guess(self) -> None:
         body = self.parse_body()
         explicit_at = body.index('timeSource = "explicit"')
-        tail_at = body.index('timeSource = "group-tail"')
+        tail_at = body.index("timeSource = tail.source")
         prev_side_at = body.index('timeSource = "prev-side"')
         prev_any_at = body.index('timeSource = "prev-any"')
         self.assertLess(explicit_at, tail_at)
@@ -52,8 +52,10 @@ class ReadTimeInheritanceContractTests(unittest.TestCase):
         self.assertLess(prev_side_at, prev_any_at)
         # The tail pass must run over the full analysed window before the
         # per-row loop consumes it — it looks at rows that come LATER.
-        self.assertIn("let groupTailTimes = resolveGroupTailTimes(analyses)", body)
-        self.assertIn("groupTailTimes[offset]", body)
+        self.assertIn("let groupTails = resolveGroupTailStamps(analyses)", body)
+        self.assertIn("groupTails[offset]", body)
+        # The tooltip date rides the same label, so it must travel with it.
+        self.assertIn("analysis.axHelpDate ?? groupTails[offset]?.date ?? lastKnownDate", body)
 
     def test_tail_pass_walks_bottom_up_and_respects_run_boundaries(self) -> None:
         body = self.tail_pass_body()
@@ -64,8 +66,15 @@ class ReadTimeInheritanceContractTests(unittest.TestCase):
         # before a sender change is always labelled, so an unlabelled bubble
         # above it is a missed label, not a continuation.
         self.assertIn("carry[side == .left ? .right : .left] = nil", body)
-        # Unknown-side rows neither carry nor break a run.
+        # Unlabelled unknown-side rows neither carry nor break a run; a
+        # LABELLED unknown-side row is only a second-choice tail, superseded
+        # by any labelled row with a known side.
         self.assertIn("guard side != .unknown else { continue }", body)
+        self.assertIn('source: "tail-unknown"', body)
+        group_tail_at = body.index('source: "group-tail"')
+        unknown_tail_at = body.index('source: "tail-unknown"')
+        self.assertLess(group_tail_at, unknown_tail_at)
+        self.assertIn("carryUnknown = nil", body)
 
     def test_time_source_rides_every_encoded_row(self) -> None:
         self.assertIn('case timeSource = "time_source"', self.reader_source)
@@ -97,7 +106,7 @@ class ReadAuthorAnchorAtWindowEdgeContractTests(unittest.TestCase):
     def setUp(self) -> None:
         reader_source = TRANSCRIPT_READER.read_text(encoding="utf-8")
         self.parse_body = reader_source.split("private func parseMessages", 1)[1].split(
-            "private func resolveGroupTailTimes", 1
+            "private func resolveGroupTailStamps", 1
         )[0]
 
     def test_unknown_side_does_not_reset_the_anchor(self) -> None:
