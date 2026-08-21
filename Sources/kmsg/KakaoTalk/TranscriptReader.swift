@@ -15,6 +15,17 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
     /// half-rendered window) — author nil there is NOT a "(me)" verdict, and
     /// consumers must not anchor or gate on such rows (talkfriend 2026-08-14).
     let authorSource: String?
+    /// How `timeRaw` was decided. "explicit" = this row carries its own time
+    /// label; "group-tail" = inherited from the next stamped row on the same
+    /// side (KakaoTalk labels only the LAST bubble of a same-minute run, so
+    /// the earlier bubbles of a burst have no label of their own); "prev-side"
+    /// / "prev-any" = the old backward guess from an earlier row, kept only as
+    /// a last resort — it is what stamped a burst's leading bubbles with the
+    /// previous sender's minute (talkfriend 2026-08-14~21: 66% of ">5min late"
+    /// rows carried the minute of our own last reply, and the same bubble got
+    /// two different minutes across reads, defeating the server's
+    /// (body, minute) replay dedup). nil when no time could be resolved.
+    let timeSource: String?
     let logicalTimestamp: Date?
     /// Calendar date of the message ("YYYY-MM-DD"), read from the time
     /// label's AXHelp tooltip. nil when the tooltip was unavailable.
@@ -40,6 +51,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         case author
         case authorSource = "author_source"
         case timeRaw = "time_raw"
+        case timeSource = "time_source"
         case body
         case date
         case hasImage = "has_image"
@@ -55,6 +67,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         author: String?,
         authorSource: String? = nil,
         timeRaw: String?,
+        timeSource: String? = nil,
         body: String,
         imageCount: Int = 0,
         linkCount: Int = 0,
@@ -69,6 +82,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         self.author = author
         self.authorSource = authorSource
         self.timeRaw = timeRaw
+        self.timeSource = timeSource
         self.body = body
         self.imageCount = max(0, imageCount)
         self.linkCount = max(0, linkCount)
@@ -86,6 +100,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         try container.encode(author ?? "(me)", forKey: .author)
         try container.encodeIfPresent(authorSource, forKey: .authorSource)
         try container.encodeIfPresent(timeRaw, forKey: .timeRaw)
+        try container.encodeIfPresent(timeSource, forKey: .timeSource)
         try container.encode(body, forKey: .body)
         try container.encodeIfPresent(date, forKey: .date)
         try container.encode(hasImage, forKey: .hasImage)
@@ -102,6 +117,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
             author: author,
             authorSource: authorSource,
             timeRaw: timeRaw,
+            timeSource: timeSource,
             body: body,
             imageCount: imageCount,
             linkCount: linkCount,
@@ -423,6 +439,7 @@ struct KakaoTalkTranscriptReader {
             runner.log("read: row analysis early stop after \(reversedAnalyses.count)/\(rowsToAnalyze.count) rows")
         }
         let analyses = Array(reversedAnalyses.reversed())
+        let groupTailTimes = resolveGroupTailTimes(analyses)
 
         var messages: [TranscriptMessage] = []
         messages.reserveCapacity(min(analyses.count, limit * 2))
@@ -439,12 +456,21 @@ struct KakaoTalkTranscriptReader {
 
         for (offset, analysis) in analyses.enumerated() {
             let side = analysis.side
-            if side != .left || analysis.isSystemLikeRow {
+            // A right-side (our) bubble or a system row ends the other party's
+            // run. An unknown side does NOT: it is a non-verdict (the row's AX
+            // frame is missing — typical for rows above the rendered viewport),
+            // and clearing the anchor on it orphaned the rest of the run as
+            // "left-unresolved" whenever a burst straddled the window top.
+            if side == .right || analysis.isSystemLikeRow {
                 leftAnchorAuthor = nil
                 leftAnchorTimeRaw = nil
             }
 
-            if side == .left,
+            // The name label is static text and is readable even when the
+            // row's frame is not, so a labelled row with an unknown side still
+            // anchors the run. In a 1:1 chat only the other party's bubbles
+            // carry a name; our own never do.
+            if side != .right,
                let explicitAuthor = analysis.explicitAuthor,
                !analysis.isSystemLikeRow
             {
@@ -508,23 +534,40 @@ struct KakaoTalkTranscriptReader {
             )
             let author = resolvedAuthor.author
 
+            // KakaoTalk prints the time on the LAST bubble of a same-minute,
+            // same-sender run, so an unlabelled bubble's minute lives on a
+            // LATER row (group-tail), not an earlier one. The backward guess
+            // (prev-side/prev-any) is only what is left when no tail label was
+            // readable; it stamps the bubble with the previous run's minute —
+            // which, right after we replied, is our own minute.
             let resolvedTime: String?
+            let timeSource: String?
             if let explicitTime = analysis.timeRaw {
                 resolvedTime = explicitTime
+                timeSource = "explicit"
                 lastKnownTime = explicitTime
                 if side != .unknown {
                     lastTimeBySide[side] = explicitTime
                 }
+            } else if let tailTime = groupTailTimes[offset] {
+                resolvedTime = tailTime
+                timeSource = "group-tail"
             } else if side != .unknown, let sideTime = lastTimeBySide[side] {
                 resolvedTime = sideTime
+                timeSource = "prev-side"
+            } else if let fallbackTime = lastKnownTime {
+                resolvedTime = fallbackTime
+                timeSource = "prev-any"
             } else {
-                resolvedTime = lastKnownTime
+                resolvedTime = nil
+                timeSource = nil
             }
 
             let message = TranscriptMessage(
                 author: author,
                 authorSource: resolvedAuthor.source,
                 timeRaw: resolvedTime,
+                timeSource: timeSource,
                 body: bodyCandidate.body,
                 imageCount: analysis.imageCount,
                 linkCount: analysis.linkCount,
@@ -541,13 +584,43 @@ struct KakaoTalkTranscriptReader {
             messages.append(message)
             if selectedLogs < 10 {
                 runner.log(
-                    "read: row[\(offset + 1)] side=\(side.rawValue) author='\(author ?? "(me)")' source=\(resolvedAuthor.source) time='\(resolvedTime ?? "unknown")' body='\(bodyCandidate.body.prefix(60))'"
+                    "read: row[\(offset + 1)] side=\(side.rawValue) author='\(author ?? "(me)")' source=\(resolvedAuthor.source) time='\(resolvedTime ?? "unknown")' timesrc=\(timeSource ?? "none") body='\(bodyCandidate.body.prefix(60))'"
                 )
                 selectedLogs += 1
             }
         }
 
         return messages
+    }
+
+    /// For every unlabelled message row, the time of the next labelled row on
+    /// the same side, walking bottom-up. A run ends at a system row (date
+    /// separator) or at a labelled row of the opposite side — KakaoTalk
+    /// labels the last bubble before a sender change, so an unlabelled bubble
+    /// followed by the other sender's labelled bubble is a label we failed to
+    /// read, not a group continuation; inheriting across it would be a guess
+    /// in the wrong direction too. Unknown-side rows neither carry nor break
+    /// a run: without a frame there is no way to tell which run they belong
+    /// to, so they fall through to the caller's backward fallback.
+    private func resolveGroupTailTimes(_ analyses: [RowAnalysis]) -> [String?] {
+        var tailTimes = [String?](repeating: nil, count: analyses.count)
+        var carry: [MessageSide: String] = [:]
+        for index in stride(from: analyses.count - 1, through: 0, by: -1) {
+            let analysis = analyses[index]
+            if analysis.isSystemLikeRow {
+                carry.removeAll()
+                continue
+            }
+            let side = analysis.side
+            guard side != .unknown else { continue }
+            if let explicitTime = analysis.timeRaw {
+                carry[side] = explicitTime
+                carry[side == .left ? .right : .left] = nil
+            } else if let tailTime = carry[side] {
+                tailTimes[index] = tailTime
+            }
+        }
+        return tailTimes
     }
 
     private func directRowChildren(from element: UIElement) -> [UIElement] {

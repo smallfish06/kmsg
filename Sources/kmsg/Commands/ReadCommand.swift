@@ -223,6 +223,14 @@ struct ReadCommand: ParsableCommand {
                 "unattributed",
                 String(snapshot.messages.filter { $0.authorSource == "unattributed" }.count)
             )
+            // Rows whose minute is still a backward guess (no readable tail
+            // label on their run). Each one may carry the previous sender's
+            // minute — in production that is our own last reply's minute —
+            // so this count is how much of the read's time_raw is suspect.
+            profiler.note(
+                "timeguess",
+                String(snapshot.messages.filter { $0.timeSource == "prev-side" || $0.timeSource == "prev-any" }.count)
+            )
         } catch TranscriptReadError.transcriptContextUnavailable {
             // A missing transcript area is a real failure (wrong/blank window) —
             // in JSON mode report it as an error so callers don't mistake it for
