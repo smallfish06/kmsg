@@ -67,9 +67,12 @@ class SendIdentityVerificationContractTests(unittest.TestCase):
         self.assertIn("precomposedStringWithCanonicalMapping", CHAT_ANCHOR.read_text(encoding="utf-8"))
 
     def test_anchor_rules_ignore_anchors_that_prove_nothing(self) -> None:
+        # 길이 하한이 아니라 내용 글자 수다. 8자 하한은 짧게 말하는 사람을 교착에
+        # 빠뜨렸다 (2026-08-22 소영). 자모·기호뿐인 줄만 거른다.
         source = CHAT_ANCHOR.read_text(encoding="utf-8")
-        self.assertIn("static let minimumLength = 8", source)
-        self.assertIn("normalized.count >= minimumLength", source)
+        self.assertIn("static let minimumContentCharacters = 2", source)
+        self.assertIn("guard isDistinctive(normalized)", source)
+        self.assertNotIn("minimumLength", source)
 
     def test_anchor_rules_stay_dependency_free(self) -> None:
         # tests/test_chat_anchor_matching.py 가 이 파일 하나만 컴파일해 규칙을 실제로

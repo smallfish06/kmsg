@@ -39,9 +39,18 @@ check("other room", ChatAnchor.matchCount(anchors: [reply, mine], inTranscriptBo
 // 잘린 앵커도 앞부분 일치로 확인된다 (서버가 길이를 잘라 보낼 수 있다).
 check("truncated anchor", ChatAnchor.matchCount(anchors: [String(reply.prefix(12))], inTranscriptBodies: transcript), 1)
 
-// 짧은 맞장구는 어느 방에나 있어서 증거가 아니다.
-check("short anchor ignored", ChatAnchor.matchCount(anchors: ["ㅇㅇ"], inTranscriptBodies: transcript), 0)
-check("short anchor usable", ChatAnchor.usable(["ㅇㅇ", "응 ㅋㅋ"]).count, 0)
+// 자모·기호뿐이거나 내용 글자가 하나뿐인 줄은 어느 방에나 있어서 증거가 아니다.
+check("jamo-only ignored", ChatAnchor.matchCount(anchors: ["ㅇㅇ"], inTranscriptBodies: transcript), 0)
+check("jamo-only usable", ChatAnchor.usable(["ㅇㅇ", "ㅋㅋㅋ", "ㅠㅠㅠ", "응 ㅋㅋ", "?", "~.~", "🙏"]).count, 0)
+
+// 짧아도 내용 글자가 둘이면 앵커다 — 길이는 구별력의 기준이 아니다. 8자 하한은 짧게
+// 말하는 사람을 교착에 빠뜨렸다 (2026-08-22 소영).
+check("short content anchor usable", ChatAnchor.usable(["안녕", "민준아 ㅜ", "ok", "12시", "ありがとう"]).count, 5)
+let terse = ["안녕", "민준아 뭐해?", "민준아 ㅜ", "ㅠㅠㅠ"]
+check("terse room", ChatAnchor.matchCount(anchors: terse, inTranscriptBodies: ["소영님이 ChatGPT을 제거했습니다.", "민준아 ㅜ", "민준아 뭐해?", "안녕", "ㅠㅠㅠ"]), 3)
+// 짧은 줄 하나는 앞부분 일치로 남의 방에도 맞을 수 있다(안녕 → 안녕하세요). 그래서 호출자가
+// 여러 개 일치를 요구한다 — 낱개가 아니라 조합이 증거다.
+check("terse other room", ChatAnchor.matchCount(anchors: terse, inTranscriptBodies: ["안녕하세요", "오늘 뭐해?", "ㅠㅠㅠ"]), 1)
 
 // 같은 앵커를 여러 번 넘겨도 한 번만 센다 — 안 그러면 expect-min 2 가 공짜로 통과한다.
 check("dedupe", ChatAnchor.matchCount(anchors: [reply, reply], inTranscriptBodies: transcript), 1)
