@@ -152,7 +152,13 @@ class FriendOpenProfileCommandContractTests(unittest.TestCase):
         self.assertNotIn("value.trimmingCharacters", send_confirmation[: send_confirmation.index("guard sent else")])
         self.assertIn("messageSendNotConfirmed", source)
         self.assertNotIn("typeTextWithVerification(message, on: nil", source)
-        self.assertNotIn("ChatWindowResolver", source)
+        # 발송은 열기 단계가 확정한 창 핸들로만 간다 — 발송 시점에 제목으로 창을
+        # 재해석(ChatWindowResolver)하면 확인한 방과 타이핑하는 방이 갈릴 수 있다.
+        # (ChatWindowResolver 자체는 열기 폴백 사다리에서만 쓴다 —
+        # test_friend_add_chat_open_fallback_contract.py 가 그 경계를 본다.)
+        send_body = source.split("private func sendFirstMessage(", 1)[1].split("\n    private func ", 1)[0]
+        self.assertNotIn("ChatWindowResolver", send_body)
+        self.assertNotIn("resolver.resolve", send_body)
 
     def test_friend_add_confirms_a_unique_chat_identity_from_title_and_opener(self) -> None:
         source = CONTACT_AUTOMATION.read_text(encoding="utf-8")

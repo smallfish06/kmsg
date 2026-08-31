@@ -703,6 +703,15 @@ struct KakaoContactAutomation {
                 return resolvedAction != nil
             }
             guard foundAction, let resolvedAction else {
+                // 친구 추가 자체는 이미 눌렸다 — 프로필 UI 가 안 떠도 친구는 존재하므로
+                // read/send 의 목록/검색 사다리로 같은 방을 열 수 있다.
+                if let recovered = openChatViaResolverLadder(
+                    friendName: friendName,
+                    transientProfileRoot: nil,
+                    mainListWindow: mainListWindow
+                ) {
+                    return recovered
+                }
                 throw KakaoTalkError.elementNotFound(
                     "[\(ContactAutomationFailureCode.chatStartUINotFound.rawValue)] 1:1 chat action did not appear after adding '\(friendName)'"
                 )
@@ -775,6 +784,19 @@ struct KakaoContactAutomation {
                 )
             }
             runner.log("1:1 chat failure focused: '\(kakao.focusedWindow?.title ?? "")'")
+            // 마지막 단: 프로필의 1:1 클릭이 창을 못 띄워도 친구는 이미 추가돼 있다.
+            // read/send 가 쓰는 목록/검색 사다리(resolve)는 행 열기 실패를
+            // press→확인→raise→선택+Enter 로 단계별 복구하고 검색은 제목 완전일치만
+            // 받으므로, 같은 사다리로 방을 열어 발송을 살린다 (2026-08-31 이혜린:
+            // CHAT_WINDOW_NOT_READY 5/5 로 결제 유저 연결이 죽었다 — 48시간에 7명,
+            // 전부 이 코드가 유일한 실패 지점이었다).
+            if let recovered = openChatViaResolverLadder(
+                friendName: friendName,
+                transientProfileRoot: actionRoot,
+                mainListWindow: mainListWindow
+            ) {
+                return recovered
+            }
             throw KakaoTalkError.windowNotFound(
                 "[\(ContactAutomationFailureCode.chatWindowNotReady.rawValue)] 1:1 chat for '\(friendName)' did not expose a message input"
             )
@@ -787,6 +809,58 @@ struct KakaoContactAutomation {
         )
         runner.log("friend add: 1:1 chat ready title='\(chatWindow.title ?? friendName)'")
         return chatWindow
+    }
+
+    /// 프로필의 1:1 클릭이 입력창 있는 채팅창을 못 띄웠을 때의 폴백 사다리.
+    ///
+    /// 이 시점에 친구는 이미 추가돼 있으므로(추가 확인 버튼이 눌린 뒤다) 방을 여는
+    /// 다른 경로가 존재한다 — read/send 가 쓰는 `ChatWindowResolver.resolve(query:)`.
+    /// 그 경로는 기존 창을 제목 완전일치로만 받고, 검색도 완전일치 후보만 열며
+    /// (kmsg 5d5c946), 결과 열기 자체가 활성화→더블클릭→선택→Enter 사다리다.
+    /// 연락처 이름에는 전화 뒷자리 접미사('이혜린(0432)')가 붙어 있어 완전일치
+    /// 검색이 동명이인의 다른 방을 집을 수 없다.
+    ///
+    /// **입력창(composer) 확인을 통과한 창만 돌려준다.** 검색 결과에는 친구 프로필도
+    /// 섞이는데 프로필 창은 제목이 방 제목과 같으면서 입력창이 없다 — 그걸 돌려주면
+    /// 첫 메시지 발송이 엉뚱한 창에서 죽는다. 실패하면 nil 을 돌려 호출자가 원래의
+    /// 실패 코드를 그대로 던지게 한다(폴백이 에러 모양을 바꾸면 서버의 재시도 판정이
+    /// 흔들린다).
+    private func openChatViaResolverLadder(
+        friendName: String,
+        transientProfileRoot: UIElement?,
+        mainListWindow: UIElement
+    ) -> UIElement? {
+        runner.log(
+            "friend add: profile 1:1 click did not surface a chat window; " +
+                "trying the chat-list/search ladder for '\(friendName)'"
+        )
+        let resolver = ChatWindowResolver(kakao: kakao, runner: runner)
+        do {
+            let resolution = try resolver.resolve(query: friendName)
+            let window = resolution.window
+            guard !sameElement(window, mainListWindow) else {
+                runner.log("friend add: ladder fallback resolved the main list window; rejecting")
+                return nil
+            }
+            guard hasChatComposer(in: window, stillShowsChatStartAction: false) else {
+                runner.log(
+                    "friend add: ladder fallback window '\(window.title ?? "")' has no message input; rejecting"
+                )
+                return nil
+            }
+            if let transientProfileRoot {
+                closeTransientProfileWindowIfNeeded(
+                    transientProfileRoot,
+                    chatWindow: window,
+                    mainListWindow: mainListWindow
+                )
+            }
+            runner.log("friend add: ladder fallback opened chat title='\(window.title ?? friendName)'")
+            return window
+        } catch {
+            runner.log("friend add: ladder fallback failed: \(error)")
+            return nil
+        }
     }
 
     private func sendFirstMessage(_ message: String, in chatWindow: UIElement) throws {
