@@ -663,6 +663,7 @@ struct KakaoTalkTranscriptReader {
 
         var bodyCandidates: [MessageBodyCandidate] = []
         var metadataTokensBuffer: [String] = []
+        var authorTokensBuffer: [String] = []
         var buttonTitlesBuffer: [String] = []
         var imageFrames: [CGRect] = []
         var rowHelpDate: String?
@@ -725,6 +726,14 @@ struct KakaoTalkTranscriptReader {
                 if links.isEmpty { links = found[kAXLinkRole] ?? [] }
             }
 
+            let contentFrames = (textAreas + links).compactMap { frameCache.frame(of: $0) }
+                + images.compactMap { frameCache.frame(of: $0) }.filter { $0.width > 72 || $0.height > 72 }
+            let hasRichContent = !links.isEmpty
+                || images.contains { image in
+                    guard let frame = frameCache.frame(of: image) else { return false }
+                    return frame.width > 72 || frame.height > 72
+                }
+                || textAreas.contains { countURLTokens(in: normalizeBodyText($0.stringValue)) > 0 }
             for staticText in staticTexts {
                 let (rawValue, help) = staticText.valueAndHelp()
                 if rowHelpDate == nil, let help, let parsed = Self.parseHelpDate(help) {
@@ -732,7 +741,12 @@ struct KakaoTalkTranscriptReader {
                 }
                 let normalized = normalizeBodyText(rawValue)
                 guard !normalized.isEmpty else { continue }
-                metadataTokensBuffer.append(contentsOf: metadataTokens(from: normalized))
+                let tokens = metadataTokens(from: normalized)
+                metadataTokensBuffer.append(contentsOf: tokens)
+                if isSenderLabel(staticText, in: container, contentFrames: contentFrames,
+                                 hasRichContent: hasRichContent, frameCache: frameCache) {
+                    authorTokensBuffer.append(contentsOf: tokens)
+                }
                 urlTokenCount += countURLTokens(in: normalized)
             }
 
@@ -771,8 +785,10 @@ struct KakaoTalkTranscriptReader {
                 bodyCandidates.append(MessageBodyCandidate(body: resolved, frame: textArea.frame))
             }
 
-            if textAreas.isEmpty, let linkOnlyText = bestLinkTitle(from: container) {
-                bodyCandidates.append(MessageBodyCandidate(body: linkOnlyText, frame: container.frame))
+            if textAreas.isEmpty, let linkBody = bestLinkBodyCandidate(from: container) {
+                // A cell spans both sides of the transcript. Only the actual
+                // card/link bounds can identify an outgoing shared bubble.
+                bodyCandidates.append(linkBody)
                 linkElementCount = max(linkElementCount, 1)
             }
         }
@@ -783,7 +799,7 @@ struct KakaoTalkTranscriptReader {
 
         let uniqueMetadataTokens = deduplicatePreservingOrder(metadataTokensBuffer)
         let uniqueButtonTitles = deduplicatePreservingOrder(buttonTitlesBuffer)
-        let metadata = parseRowMetadata(tokens: metadataTokensBuffer)
+        let metadata = parseRowMetadata(tokens: metadataTokensBuffer, authorTokens: authorTokensBuffer)
         let cachedRowFrame = frameCache.frame(of: row)
         let messageImageFrames = likelyMessageImageFrames(
             imageFrames,
@@ -795,7 +811,8 @@ struct KakaoTalkTranscriptReader {
         let attachmentActionCount = uniqueButtonTitles.filter(isLikelyAttachmentButtonTitle).count
         // Attachments are non-image files; images are reported separately via imageCount.
         let attachmentCount = attachmentMetadataCount + attachmentActionCount
-        let side = inferMessageSide(
+        let hasUnmeasuredLink = linkElementCount > 0 && bestBody?.frame == nil && messageImageFrames.isEmpty
+        let side: MessageSide = hasUnmeasuredLink ? .unknown : inferMessageSide(
             bodyFrame: bestBody?.frame ?? messageImageFrames.first,
             imageFrames: messageImageFrames,
             rowFrame: cachedRowFrame,
@@ -839,7 +856,7 @@ struct KakaoTalkTranscriptReader {
                 runner.log("read: fallback link title used")
             }
             let row = firstAncestor(of: textArea, role: kAXRowRole, maxHops: 6)
-            let metadata = row.map { extractRowMetadata(from: $0) } ?? RowMetadata(author: nil, timeRaw: nil)
+            let metadata = row.map { extractRowMetadata(from: $0, transcriptRoot: transcriptRoot, referenceDate: referenceDate) } ?? RowMetadata(author: nil, timeRaw: nil)
             messages.append(
                 TranscriptMessage(
                     author: metadata.author,
@@ -885,24 +902,48 @@ struct KakaoTalkTranscriptReader {
         return Array(deduplicateMessagesPreservingOrder(messages).suffix(limit))
     }
 
-    private func extractRowMetadata(from row: UIElement) -> RowMetadata {
-        let cells = row.findAll(role: kAXCellRole, limit: 8, maxNodes: 180)
-        let containers = cells.isEmpty ? [row] : cells
-
-        var tokens: [String] = []
-        for container in containers {
-            let staticTexts = container.findAll(role: kAXStaticTextRole, limit: 12, maxNodes: 240)
-            for staticText in staticTexts {
-                let normalized = normalizeBodyText(staticText.stringValue)
-                guard !normalized.isEmpty else { continue }
-                tokens.append(contentsOf: metadataTokens(from: normalized))
-            }
-        }
-
-        return parseRowMetadata(tokens: tokens)
+    private func extractRowMetadata(from row: UIElement, transcriptRoot: UIElement, referenceDate: Date) -> RowMetadata {
+        // Fallback reads must not resurrect a card title as an author after the
+        // regular row parser rejected it. analyzeRow does not mutate the UI.
+        let analysis = analyzeRow(row, transcriptRoot: transcriptRoot, referenceDate: referenceDate, frameCache: FrameCache())
+        return RowMetadata(author: analysis.side == .right ? nil : analysis.explicitAuthor, timeRaw: analysis.timeRaw)
     }
 
-    private func parseRowMetadata(tokens: [String]) -> RowMetadata {
+    private func isSenderLabel(
+        _ label: UIElement,
+        in container: UIElement,
+        contentFrames: [CGRect],
+        hasRichContent: Bool,
+        frameCache: FrameCache
+    ) -> Bool {
+        var cursor = label.parent
+        var hops = 0
+        var direct = false
+        var reachedContainer = false
+        var insideContent = false
+        while let ancestor = cursor, hops < 8 {
+            if CFEqual(ancestor.axElement, container.axElement) {
+                direct = hops == 0
+                reachedContainer = true
+                break
+            }
+            if [kAXLinkRole, kAXTextAreaRole, kAXButtonRole, kAXImageRole].contains(ancestor.role ?? "") {
+                insideContent = true
+            }
+            cursor = ancestor.parent
+            hops += 1
+        }
+        return TranscriptAuthorEvidence.isSenderLabel(
+            labelFrame: frameCache.frame(of: label),
+            contentFrames: contentFrames,
+            isDirectMetadata: direct,
+            isInsideContent: insideContent || !reachedContainer,
+            hasRichContent: hasRichContent
+        )
+    }
+
+    private func parseRowMetadata(tokens: [String], authorTokens: [String]) -> RowMetadata {
+        let eligibleAuthors = Set(authorTokens)
         let uniqueTokens = deduplicatePreservingOrder(tokens)
         var author: String?
         var timeRaw: String?
@@ -921,7 +962,7 @@ struct KakaoTalkTranscriptReader {
                 continue
             }
 
-            if author == nil {
+            if author == nil, eligibleAuthors.contains(token) {
                 author = token
             }
         }
@@ -1153,12 +1194,14 @@ struct KakaoTalkTranscriptReader {
         leftAnchorAuthor: String?,
         leftAnchorTimeRaw: String?
     ) -> (author: String?, source: String) {
-        if let explicitAuthor = analysis.explicitAuthor {
-            return (explicitAuthor, "explicit")
-        }
-
+        // Content metadata can never turn a measured outgoing bubble into a
+        // peer message, even if KakaoTalk exposes an unexpected sender label.
         if analysis.side == .right {
             return (nil, "default-me")
+        }
+
+        if let explicitAuthor = analysis.explicitAuthor {
+            return (explicitAuthor, "explicit")
         }
 
         // side == .unknown means the AX frames needed for the side judgment
@@ -1368,13 +1411,16 @@ struct KakaoTalkTranscriptReader {
     }
 
     private func bestLinkTitle(from element: UIElement) -> String? {
-        let links = element.findAll(where: { $0.role == kAXLinkRole }, limit: 4, maxNodes: 120)
-        let titles = links.compactMap { link in
-            normalizeBodyText(link.title ?? link.stringValue)
-        }
-        .filter { !$0.isEmpty }
+        bestLinkBodyCandidate(from: element)?.body
+    }
 
-        return titles.max { lhs, rhs in lhs.count < rhs.count }
+    private func bestLinkBodyCandidate(from element: UIElement) -> MessageBodyCandidate? {
+        let links = element.findAll(where: { $0.role == kAXLinkRole }, limit: 4, maxNodes: 120)
+        return links.compactMap { link -> MessageBodyCandidate? in
+            let title = normalizeBodyText(link.title ?? link.stringValue)
+            guard !title.isEmpty else { return nil }
+            return MessageBodyCandidate(body: title, frame: link.frame)
+        }.max { $0.body.count < $1.body.count }
     }
 
     private func normalizeBodyText(_ text: String?) -> String {
