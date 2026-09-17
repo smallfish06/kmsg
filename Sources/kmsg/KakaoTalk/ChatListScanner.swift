@@ -524,13 +524,25 @@ struct ChatListScanner {
     }
 
     private func extractPreview(from content: RowContent, title: String) -> String? {
+        // The preview is the row's AXTextArea; the unread badge and the timestamp
+        // are AXStaticTexts (badge id "Count Label"). A text area can therefore
+        // never be the badge, and rejecting digit-only text there drops real
+        // messages: a row whose last message was "123456" reported its TIMESTAMP
+        // ("오후 6:06") as the preview (measured 2026-09-17) — which is exactly the
+        // shape of a talkfriend connect code, so the bridge could never see one.
         for node in content.textNodes where node.role == kAXTextAreaRole {
-            if let preview = previewCandidate(value: node.value, nodeTitle: node.title, identifier: node.identifier, rowTitle: title) {
+            if let preview = previewCandidate(
+                value: node.value, nodeTitle: node.title, identifier: node.identifier,
+                rowTitle: title, fromTextArea: true
+            ) {
                 return preview
             }
         }
         for node in content.textNodes where node.role == kAXStaticTextRole {
-            if let preview = previewCandidate(value: node.value, nodeTitle: node.title, identifier: node.identifier, rowTitle: title) {
+            if let preview = previewCandidate(
+                value: node.value, nodeTitle: node.title, identifier: node.identifier,
+                rowTitle: title, fromTextArea: false
+            ) {
                 return preview
             }
         }
@@ -574,15 +586,25 @@ struct ChatListScanner {
         return nil
     }
 
-    private func previewCandidate(value: String?, nodeTitle: String?, identifier: String?, rowTitle: String) -> String? {
+    private func previewCandidate(
+        value: String?, nodeTitle: String?, identifier: String?, rowTitle: String, fromTextArea: Bool
+    ) -> String? {
         guard let value = normalizedText(value) ?? normalizedText(nodeTitle) else {
             return nil
         }
         if identifier == "Count Label" {
             return nil
         }
-        if ChatTextNormalizer.isTimeLikeValue(value) || ChatTextNormalizer.isUnreadCountLike(value) {
-            return nil
+        if !fromTextArea {
+            // Static-text fallback only: here a bare number is the badge and a
+            // clock string is the row's timestamp cell. isTimeLikeValue alone
+            // misses "오후 6:06" (it only knows bare "11:47"), which is how the
+            // timestamp leaked out as a preview.
+            if ChatTextNormalizer.isTimeLikeValue(value) || ChatTextNormalizer.isClockLikeValue(value)
+                || ChatTextNormalizer.isUnreadCountLike(value)
+            {
+                return nil
+            }
         }
         if ChatTextNormalizer.normalize(value) == ChatTextNormalizer.normalize(rowTitle) {
             return nil
