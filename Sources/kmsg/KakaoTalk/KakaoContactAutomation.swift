@@ -7,6 +7,15 @@ struct KakaoFriendAddResult {
     let externalChatID: String?
 }
 
+struct KakaoFriendAcceptResult {
+    let chatTitle: String
+    let externalChatID: String
+    /// false when the person was already a friend (pencil already present).
+    let added: Bool
+    /// false when the friend name already matched.
+    let renamed: Bool
+}
+
 enum FriendAddTarget {
     case kakaoID(String)
     case contact(name: String, phone: String)
@@ -38,6 +47,11 @@ private enum ContactAutomationFailureCode: String {
     case messageInputNotFound = "MESSAGE_INPUT_NOT_FOUND"
     case messageSendNotConfirmed = "MESSAGE_SEND_NOT_CONFIRMED"
     case chatIdentityNotConfirmed = "CHAT_IDENTITY_NOT_CONFIRMED"
+    case connectCodeNotFound = "CONNECT_CODE_NOT_FOUND"
+    case profilePopoverNotOpened = "PROFILE_POPOVER_NOT_OPENED"
+    case friendAcceptNotConfirmed = "FRIEND_ACCEPT_NOT_CONFIRMED"
+    case renameUINotFound = "RENAME_UI_NOT_FOUND"
+    case renameNotConfirmed = "RENAME_NOT_CONFIRMED"
 }
 
 struct KakaoContactAutomation {
@@ -173,6 +187,240 @@ struct KakaoContactAutomation {
             chatTitle: chatTitle,
             externalChatID: externalChatID
         )
+    }
+
+    // MARK: - Accept (the user added us first and sent a connect code)
+
+    /// 코드 방식 connect 의 수락. 유저가 먼저 이 계정을 친구추가하고 그 방에 연결코드를
+    /// 보냈다. 친구추가 **검색 UI 는 일절 건드리지 않는다** — 계정이 먼저 거는 친구추가가
+    /// 정지의 원인이었다(talkfriend 2026-09-17). 전부 이미 열린 그 방 안에서 일어난다:
+    ///
+    /// 1. 전사 꼬리에 코드가 있는지 확인한다. 방의 신원은 제목이 아니라 그 한 줄이다.
+    /// 2. 헤더의 프로필 버튼 → 프로필은 창이 아니라 그 버튼에 매달린 AXPopover 다
+    ///    (kAXWindows 에 안 나온다). 그 버튼은 AXPress 를 받지 않아 실제 클릭이 필요하다.
+    /// 3. 비친구면 팝오버에 연필이 없고 "친구 추가"가 있다. 그 버튼의 AXPress 는
+    ///    **-25200 을 돌려주면서 실제로는 성공한다** — 반환값이 아니라 연필의 출현으로 검증한다.
+    /// 4. 연필("프로필 편집") → "친구 정보"도 중첩 AXPopover. 이름 칸은 AXValue 설정만으로
+    ///    `확인` 이 켜진다(키보드 입력이 없으므로 남의 입력창에 글자가 샐 경로가 없다).
+    /// 5. 같은 창 핸들로 오프너를 보내고, 바뀐 제목 + 그 미리보기로 목록 행을 특정한다.
+    ///    이름 변경은 그 사람이 낀 제목 없는 방을 전부 같은 제목으로 바꾸므로 제목만으로는
+    ///    행을 고르지 않는다.
+    ///
+    /// 실측 근거는 talkfriend 메모리 `kakao-friend-rename-ax-recipe` (2026-09-17, 로컬 카톡).
+    func acceptFriend(
+        in chatWindow: UIElement,
+        newName: String,
+        connectCode: String,
+        message: String?
+    ) throws -> KakaoFriendAcceptResult {
+        profiler?.begin("verify")
+        try verifyConnectCode(connectCode, in: chatWindow)
+
+        profiler?.begin("profile")
+        kakao.activate()
+        _ = tryRaiseWindow(chatWindow, label: "accept chat")
+        let popover = try openProfilePopover(in: chatWindow)
+        var profileRoot = popover
+
+        var added = false
+        if profileButton(described: Self.profileEditDescription, in: profileRoot) == nil {
+            profiler?.begin("accept")
+            guard let addButton = profileButton(described: Self.friendAddDescription, in: profileRoot) else {
+                cancelPopover(profileRoot)
+                throw KakaoTalkError.elementNotFound(
+                    "[\(ContactAutomationFailureCode.friendAcceptNotConfirmed.rawValue)] Profile popover offered neither 프로필 편집 nor 친구 추가"
+                )
+            }
+            // The press reports kAXErrorFailure (-25200) on a successful add, so the
+            // return value is not evidence either way.
+            do { try addButton.press() } catch { runner.log("friend accept: 친구 추가 press returned \(error) (state decides)") }
+            let becameFriend = runner.waitUntil(label: "friend accept: pencil appears", timeout: 4.0, pollInterval: 0.1) {
+                if let refreshed = self.currentProfilePopover(in: chatWindow) { profileRoot = refreshed }
+                return self.profileButton(described: Self.profileEditDescription, in: profileRoot) != nil
+            }
+            guard becameFriend else {
+                cancelPopover(profileRoot)
+                throw KakaoTalkError.actionFailed(
+                    "[\(ContactAutomationFailureCode.friendAcceptNotConfirmed.rawValue)] 친구 추가 did not turn the profile into a friend profile"
+                )
+            }
+            added = true
+            runner.log("friend accept: friend added from the chat's own profile popover")
+        }
+
+        var renamed = false
+        if usableChatTitle(chatWindow.title) != newName {
+            profiler?.begin("rename")
+            try renameFriend(to: newName, profileRoot: profileRoot, chatWindow: chatWindow)
+            renamed = true
+        }
+        if let open = currentProfilePopover(in: chatWindow) { cancelPopover(open) }
+
+        guard let chatTitle = usableChatTitle(chatWindow.title), chatTitle == newName else {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.renameNotConfirmed.rawValue)] Chat window title is not the requested friend name after rename"
+            )
+        }
+
+        let mainListWindow = try requireMainListWindow()
+        let externalChatID: String
+        if let message {
+            profiler?.begin("opener")
+            try sendFirstMessage(message, in: chatWindow)
+            profiler?.begin("confirm")
+            externalChatID = try confirmChatIdentity(chatTitle: chatTitle, opener: message, mainListWindow: mainListWindow)
+        } else {
+            // No opener: the row still shows the user's code message.
+            profiler?.begin("confirm")
+            externalChatID = try confirmChatRow(chatTitle: chatTitle, mainListWindow: mainListWindow) { preview in
+                Self.text(preview, containsStandaloneCode: connectCode)
+            }
+        }
+        return KakaoFriendAcceptResult(chatTitle: chatTitle, externalChatID: externalChatID, added: added, renamed: renamed)
+    }
+
+    private static let profileDescription = "프로필"
+    private static let profileEditDescription = "프로필 편집"
+    private static let friendAddDescription = "친구 추가"
+    private static let friendInfoTitle = "친구 정보"
+    private static let confirmTitle = "확인"
+
+    static func text(_ text: String, containsStandaloneCode code: String) -> Bool {
+        guard !code.isEmpty, code.allSatisfy(\.isNumber) else { return false }
+        let digits = Array(text.precomposedStringWithCompatibilityMapping)
+        let target = Array(code)
+        guard digits.count >= target.count else { return false }
+        for start in 0...(digits.count - target.count) {
+            guard Array(digits[start..<(start + target.count)]) == target else { continue }
+            let before = start > 0 ? digits[start - 1] : " "
+            let after = start + target.count < digits.count ? digits[start + target.count] : " "
+            if !before.isNumber && !after.isNumber { return true }
+        }
+        return false
+    }
+
+    private func verifyConnectCode(_ code: String, in chatWindow: UIElement) throws {
+        let reader = KakaoTalkTranscriptReader(kakao: kakao, runner: runner)
+        let snapshot: TranscriptSnapshot
+        do {
+            snapshot = try reader.readSnapshot(
+                from: chatWindow,
+                fallbackChatTitle: chatWindow.title ?? "",
+                limit: ChatIdentityVerifier.defaultTranscriptLimit
+            )
+        } catch {
+            throw KakaoTalkError.actionFailed(
+                "[\(ChatIdentityVerifier.unverifiedCode)] could not read the transcript to find the connect code: \(error)"
+            )
+        }
+        let found = snapshot.messages.contains { !$0.isSystem && Self.text($0.body, containsStandaloneCode: code) }
+        guard found else {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.connectCodeNotFound.rawValue)] the connect code is not in the last \(snapshot.messages.count) messages of '\(snapshot.chat)' — refusing to accept or rename anyone in it"
+            )
+        }
+        runner.log("friend accept: connect code confirmed in '\(snapshot.chat)'")
+    }
+
+    /// The header profile button is a direct child of the chat window; the avatar
+    /// inside the popover carries the same description, so depth matters.
+    private func headerProfileButton(in chatWindow: UIElement) -> UIElement? {
+        chatWindow.children.first { $0.role == kAXButtonRole && $0.axDescription == Self.profileDescription }
+    }
+
+    private func currentProfilePopover(in chatWindow: UIElement) -> UIElement? {
+        headerProfileButton(in: chatWindow)?.children.first { $0.role == "AXPopover" }
+    }
+
+    private func openProfilePopover(in chatWindow: UIElement) throws -> UIElement {
+        if let open = currentProfilePopover(in: chatWindow) { return open }
+        guard let button = headerProfileButton(in: chatWindow), let frame = button.frame else {
+            throw KakaoTalkError.elementNotFound(
+                "[\(ContactAutomationFailureCode.profilePopoverNotOpened.rawValue)] Chat window has no header profile button"
+            )
+        }
+        // AXPress is unsupported on this button (-25206); only a real click opens it.
+        for attempt in 1...2 {
+            runner.mouseClick(at: CGPoint(x: frame.midX, y: frame.midY), label: "friend accept: header profile (attempt \(attempt))")
+            var popover: UIElement?
+            let opened = runner.waitUntil(label: "friend accept: profile popover", timeout: 1.5, pollInterval: 0.08) {
+                popover = self.currentProfilePopover(in: chatWindow)
+                return popover != nil
+            }
+            if opened, let popover { return popover }
+            kakao.activate()
+            _ = tryRaiseWindow(chatWindow, label: "accept chat (retry)")
+        }
+        throw KakaoTalkError.actionFailed(
+            "[\(ContactAutomationFailureCode.profilePopoverNotOpened.rawValue)] Profile popover did not open from the chat header"
+        )
+    }
+
+    private func profileButton(described description: String, in root: UIElement) -> UIElement? {
+        root.findFirst(maxDepth: 4) { $0.role == kAXButtonRole && $0.axDescription == description }
+    }
+
+    private func renameFriend(to newName: String, profileRoot: UIElement, chatWindow: UIElement) throws {
+        guard let pencil = profileButton(described: Self.profileEditDescription, in: profileRoot) else {
+            throw KakaoTalkError.elementNotFound(
+                "[\(ContactAutomationFailureCode.renameUINotFound.rawValue)] 프로필 편집 button not found in the profile popover"
+            )
+        }
+        // The pencil advertises no actions but AXPress succeeds.
+        do { try pencil.press() } catch { runner.log("friend accept: 프로필 편집 press returned \(error) (state decides)") }
+        var dialog: UIElement?
+        let dialogOpened = runner.waitUntil(label: "friend accept: 친구 정보 dialog", timeout: 2.0, pollInterval: 0.08) {
+            dialog = pencil.children.first { candidate in
+                candidate.role == "AXPopover" && candidate.children.contains { $0.stringValue == Self.friendInfoTitle }
+            }
+            return dialog != nil
+        }
+        guard dialogOpened, let dialog else {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.renameUINotFound.rawValue)] 친구 정보 dialog did not open"
+            )
+        }
+        // Scope every lookup to the dialog: a window-wide "first text area" would be
+        // the message composer the moment this layout shifts.
+        guard let field = dialog.findFirst(maxDepth: 4, where: { $0.role == kAXTextAreaRole }),
+              let confirm = dialog.findFirst(maxDepth: 4, where: { $0.role == kAXButtonRole && $0.title == Self.confirmTitle })
+        else {
+            cancelPopover(dialog)
+            throw KakaoTalkError.elementNotFound(
+                "[\(ContactAutomationFailureCode.renameUINotFound.rawValue)] 친구 정보 dialog has no name field or 확인 button"
+            )
+        }
+        do {
+            try field.setAttribute(kAXValueAttribute, value: newName as CFString)
+        } catch {
+            cancelPopover(dialog)
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.inputNotReflected.rawValue)] Friend name field rejected the new value: \(error)"
+            )
+        }
+        let ready = runner.waitUntil(label: "friend accept: 확인 enabled", timeout: 1.5, pollInterval: 0.05) {
+            field.stringValue == newName && confirm.isEnabled
+        }
+        guard ready else {
+            cancelPopover(dialog)
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.inputNotReflected.rawValue)] Friend name did not reflect or 확인 stayed disabled"
+            )
+        }
+        do { try confirm.press() } catch { runner.log("friend accept: 확인 press returned \(error) (state decides)") }
+        let retitled = runner.waitUntil(label: "friend accept: chat window retitled", timeout: 3.0, pollInterval: 0.1) {
+            self.usableChatTitle(chatWindow.title) == newName
+        }
+        guard retitled else {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.renameNotConfirmed.rawValue)] Chat window title did not change to the new friend name"
+            )
+        }
+        runner.log("friend accept: friend renamed; chat window retitled")
+    }
+
+    private func cancelPopover(_ popover: UIElement) {
+        do { try popover.performAction("AXCancel") } catch { runner.log("friend accept: popover AXCancel failed (\(error))") }
     }
 
     // ESC closes the friend-add popover and the profile window KakaoTalk opens
@@ -965,9 +1213,27 @@ struct KakaoContactAutomation {
         opener: String,
         mainListWindow: UIElement
     ) throws -> String {
-        let normalizedTitle = ChatTextNormalizer.normalizeForMatch(chatTitle)
         let normalizedOpener = ChatTextNormalizer.normalizeForMatch(opener)
-        guard !normalizedTitle.isEmpty, !normalizedOpener.isEmpty else {
+        guard !normalizedOpener.isEmpty else {
+            throw KakaoTalkError.actionFailed(
+                "[\(ContactAutomationFailureCode.chatIdentityNotConfirmed.rawValue)] Chat title or opener could not be normalized"
+            )
+        }
+        return try confirmChatRow(chatTitle: chatTitle, mainListWindow: mainListWindow) { lastMessage in
+            ChatTextNormalizer.normalizeForMatch(lastMessage) == normalizedOpener
+        }
+    }
+
+    /// The row is identified by title AND content together — the same two-factor
+    /// rule as everywhere else. A rename retitles every untitled room that
+    /// person is in, so the title alone can match more than one row.
+    private func confirmChatRow(
+        chatTitle: String,
+        mainListWindow: UIElement,
+        previewMatches: (String) -> Bool
+    ) throws -> String {
+        let normalizedTitle = ChatTextNormalizer.normalizeForMatch(chatTitle)
+        guard !normalizedTitle.isEmpty else {
             throw KakaoTalkError.actionFailed(
                 "[\(ContactAutomationFailureCode.chatIdentityNotConfirmed.rawValue)] Chat title or opener could not be normalized"
             )
@@ -999,7 +1265,7 @@ struct KakaoContactAutomation {
             let matches = snapshots.enumerated().filter { _, snapshot in
                 guard let lastMessage = snapshot.discovery.lastMessage else { return false }
                 return ChatTextNormalizer.normalizeForMatch(snapshot.discovery.title) == normalizedTitle &&
-                    ChatTextNormalizer.normalizeForMatch(lastMessage) == normalizedOpener
+                    previewMatches(lastMessage)
             }
 
             if matches.count > 1 {
