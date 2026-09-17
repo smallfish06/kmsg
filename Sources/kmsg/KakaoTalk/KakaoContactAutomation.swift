@@ -262,16 +262,23 @@ struct KakaoContactAutomation {
             )
         }
 
-        let mainListWindow = try requireMainListWindow()
+        // The opener goes out BEFORE the main list window is touched.
+        // requireMainListWindow activates, presses Escape/Cmd+2 and raises the
+        // list — it takes focus away from this chat, and sendFirstMessage then
+        // (correctly) refuses to type: "[MESSAGE_INPUT_NOT_FOUND] … did not
+        // retain focus" (measured live 2026-09-17, nothing was sent). The list
+        // is only needed to confirm the row afterwards.
         let externalChatID: String
         if let message {
             profiler?.begin("opener")
             try sendFirstMessage(message, in: chatWindow)
             profiler?.begin("confirm")
+            let mainListWindow = try requireMainListWindow()
             externalChatID = try confirmChatIdentity(chatTitle: chatTitle, opener: message, mainListWindow: mainListWindow)
         } else {
             // No opener: the row still shows the user's code message.
             profiler?.begin("confirm")
+            let mainListWindow = try requireMainListWindow()
             externalChatID = try confirmChatRow(chatTitle: chatTitle, mainListWindow: mainListWindow) { preview in
                 Self.text(preview, containsStandaloneCode: connectCode)
             }

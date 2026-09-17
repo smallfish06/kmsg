@@ -75,6 +75,14 @@ class FriendAcceptContractTests(unittest.TestCase):
         self.assertIn("previewMatches(lastMessage)", row)
         self.assertIn("matches.count > 1", row)
 
+    def test_opener_is_sent_before_the_main_list_window_takes_focus(self) -> None:
+        # requireMainListWindow raises the list (Escape, Cmd+2, AXRaise). Calling it
+        # first made sendFirstMessage refuse to type: the chat had lost focus.
+        body = self._body("func acceptFriend(", "private static let profileDescription")
+        send = body.index("sendFirstMessage(message, in: chatWindow)")
+        first_list = body.index("requireMainListWindow()")
+        self.assertLess(send, first_list)
+
     def test_command_closes_the_window_on_every_exit(self) -> None:
         body = self.command.split("struct FriendAcceptCommand", 1)[1]
         resolve = body.index("resolver.resolve(chatID: chatID)")
