@@ -214,7 +214,12 @@ struct KakaoContactAutomation {
         message: String?
     ) throws -> KakaoFriendAcceptResult {
         profiler?.begin("verify")
-        try verifyConnectCode(connectCode, in: chatWindow)
+        let tail = try verifyConnectCode(connectCode, in: chatWindow)
+        // A retry of a run that already sent the opener (the row confirmation
+        // failed afterwards) must not greet the person twice. The tail we just
+        // read for the code is the evidence: our opener is in it or it is not.
+        let openerAlreadySent = message.map { Self.transcript(tail, alreadyContains: $0) } ?? false
+        if openerAlreadySent { runner.log("friend accept: opener already in the transcript; not sending it again") }
 
         profiler?.begin("profile")
         kakao.activate()
@@ -270,8 +275,10 @@ struct KakaoContactAutomation {
         // is only needed to confirm the row afterwards.
         let externalChatID: String
         if let message {
-            profiler?.begin("opener")
-            try sendFirstMessage(message, in: chatWindow)
+            if !openerAlreadySent {
+                profiler?.begin("opener")
+                try sendFirstMessage(message, in: chatWindow)
+            }
             profiler?.begin("confirm")
             let mainListWindow = try requireMainListWindow()
             externalChatID = try confirmChatIdentity(chatTitle: chatTitle, opener: message, mainListWindow: mainListWindow)
@@ -284,6 +291,14 @@ struct KakaoContactAutomation {
             }
         }
         return KakaoFriendAcceptResult(chatTitle: chatTitle, externalChatID: externalChatID, added: added, renamed: renamed)
+    }
+
+    /// Whether our opener is already one of the messages in the tail we read.
+    /// Compared the same way the list row is matched, so "sent" and "seen" agree.
+    static func transcript(_ snapshot: TranscriptSnapshot, alreadyContains message: String) -> Bool {
+        let normalized = ChatTextNormalizer.normalizeForMatch(message)
+        guard !normalized.isEmpty else { return false }
+        return snapshot.messages.contains { !$0.isSystem && ChatTextNormalizer.normalizeForMatch($0.body) == normalized }
     }
 
     private static let profileDescription = "프로필"
@@ -306,7 +321,10 @@ struct KakaoContactAutomation {
         return false
     }
 
-    private func verifyConnectCode(_ code: String, in chatWindow: UIElement) throws {
+    /// Returns the tail it read so the caller can reuse it as evidence (e.g. an
+    /// opener a previous attempt already sent) without opening the window twice.
+    @discardableResult
+    private func verifyConnectCode(_ code: String, in chatWindow: UIElement) throws -> TranscriptSnapshot {
         let reader = KakaoTalkTranscriptReader(kakao: kakao, runner: runner)
         let snapshot: TranscriptSnapshot
         do {
@@ -327,6 +345,7 @@ struct KakaoContactAutomation {
             )
         }
         runner.log("friend accept: connect code confirmed in '\(snapshot.chat)'")
+        return snapshot
     }
 
     /// The header profile button is a direct child of the chat window; the avatar
@@ -1234,6 +1253,17 @@ struct KakaoContactAutomation {
     /// The row is identified by title AND content together — the same two-factor
     /// rule as everywhere else. A rename retitles every untitled room that
     /// person is in, so the title alone can match more than one row.
+    ///
+    /// When no row carries the expected preview but exactly ONE row carries the
+    /// exact title, that row is accepted anyway. The preview is not stable
+    /// evidence right after an opener: the person often answers within seconds
+    /// and their reply replaces our line (measured live 2026-09-18 — code →
+    /// opener → "?" inside the same minute, four attempts saw "?" and the
+    /// accept was reported failed although friend, name and opener were all
+    /// done). The title, by contrast, was set by us moments ago and issued to
+    /// be unique on this account, and an untitled group room lists several
+    /// members so it never equals the 1:1 title exactly. Only the ambiguous
+    /// case (several rows with that title) still needs the content evidence.
     private func confirmChatRow(
         chatTitle: String,
         mainListWindow: UIElement,
@@ -1269,16 +1299,25 @@ struct KakaoContactAutomation {
                 continue
             }
 
-            let matches = snapshots.enumerated().filter { _, snapshot in
+            let titled = snapshots.enumerated().filter { _, snapshot in
+                ChatTextNormalizer.normalizeForMatch(snapshot.discovery.title) == normalizedTitle
+            }
+            var matches = titled.filter { _, snapshot in
                 guard let lastMessage = snapshot.discovery.lastMessage else { return false }
-                return ChatTextNormalizer.normalizeForMatch(snapshot.discovery.title) == normalizedTitle &&
-                    previewMatches(lastMessage)
+                return previewMatches(lastMessage)
             }
 
             if matches.count > 1 {
                 throw KakaoTalkError.actionFailed(
                     "[\(ContactAutomationFailureCode.chatIdentityNotConfirmed.rawValue)] Multiple chat rows matched the exact title and opener"
                 )
+            }
+
+            if matches.isEmpty, titled.count == 1, let only = titled.first {
+                runner.log(
+                    "friend identity attempt \(attempt): preview moved on ('\(only.element.discovery.lastMessage ?? "")'); accepting the single row with the exact title"
+                )
+                matches = [only]
             }
 
             if let match = matches.first {

@@ -75,6 +75,26 @@ class FriendAcceptContractTests(unittest.TestCase):
         self.assertIn("previewMatches(lastMessage)", row)
         self.assertIn("matches.count > 1", row)
 
+    def test_a_single_row_with_the_exact_title_is_accepted_when_the_preview_moved_on(self) -> None:
+        # Live 2026-09-18: the person answered "?" seconds after the opener, so no
+        # row showed the opener preview and the accept was reported failed even
+        # though friend, name and opener were all done. The title was set by us
+        # and issued unique, so one exact-title row is enough; only several rows
+        # with that title still need the preview.
+        row = self._body("private func confirmChatRow(", "// MARK: - Accept")
+        self.assertIn("matches.isEmpty, titled.count == 1", row)
+        self.assertIn("accepting the single row with the exact title", row)
+        # The strict match is still tried first and ambiguity still fails.
+        self.assertLess(row.index("matches.count > 1"), row.index("titled.count == 1"))
+
+    def test_a_retry_does_not_send_the_opener_twice(self) -> None:
+        body = self._body("func acceptFriend(", "private static let profileDescription")
+        self.assertIn("let tail = try verifyConnectCode(connectCode, in: chatWindow)", body)
+        self.assertIn("Self.transcript(tail, alreadyContains: $0)", body)
+        self.assertIn("if !openerAlreadySent {", body)
+        helper = self._body("static func transcript(_ snapshot: TranscriptSnapshot, alreadyContains message: String)", "private static let profileDescription")
+        self.assertIn("ChatTextNormalizer.normalizeForMatch($0.body) == normalized", helper)
+
     def test_opener_is_sent_before_the_main_list_window_takes_focus(self) -> None:
         # requireMainListWindow raises the list (Escape, Cmd+2, AXRaise). Calling it
         # first made sendFirstMessage refuse to type: the chat had lost focus.
