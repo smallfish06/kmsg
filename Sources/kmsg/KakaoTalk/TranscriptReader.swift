@@ -141,6 +141,15 @@ struct TranscriptSnapshot: Sendable {
     /// Visible transcript viewport in AX screen coordinates. Image capture
     /// uses this to reject clipped thumbnails instead of saving a sliver.
     let transcriptFrame: CGRect?
+    /// Which path produced these messages, for the profiler summary line only
+    /// (the bridge sees nothing else of a read). Absent on the ordinary path:
+    ///   cut=<kept>/<rows>     the below-input cut removed rows
+    ///   sparse=<msgs>/<rows>  the first parse was sparse and was retried
+    ///   held0=<n>/<rows>      of the rows we hold, how many are childless now
+    ///   reparse=<msgs>        what the retry yielded
+    ///   fb=<msgs>             the flat text fallback ran
+    /// Diagnostics only. Nothing reads these to decide anything.
+    var readNotes: [(key: String, value: String)] = []
 
     var count: Int {
         messages.count
@@ -149,7 +158,9 @@ struct TranscriptSnapshot: Sendable {
 
 enum TranscriptReadError: LocalizedError {
     case transcriptContextUnavailable
-    case noMessageRows
+    /// `cut` is the below-input cut's "<kept>/<rows>" when it removed rows —
+    /// "0/83" is the read that comes back empty because every row was cut.
+    case noMessageRows(cut: String?)
     case noReadableMessages
 
     var errorDescription: String? {
@@ -218,17 +229,18 @@ struct KakaoTalkTranscriptReader {
     ) throws -> TranscriptSnapshot {
 
         let frameCache = FrameCache()
-        let messageRows = collectTranscriptRows(
+        let collected = collectTranscriptRows(
             from: context.transcriptRoot,
             inputElement: context.inputElement,
             messageLimit: limit,
             frameCache: frameCache
         )
+        let messageRows = collected.rows
         guard !messageRows.isEmpty else {
-            throw TranscriptReadError.noMessageRows
+            throw TranscriptReadError.noMessageRows(cut: collected.cut)
         }
 
-        let displayMessages = extractMessages(
+        let extraction = extractMessages(
             from: messageRows,
             transcriptRoot: context.transcriptRoot,
             limit: limit,
@@ -236,6 +248,7 @@ struct KakaoTalkTranscriptReader {
             referenceDate: referenceDate,
             frameCache: frameCache
         )
+        let displayMessages = extraction.messages
         guard !displayMessages.isEmpty else {
             throw TranscriptReadError.noReadableMessages
         }
@@ -245,7 +258,8 @@ struct KakaoTalkTranscriptReader {
             chat: chatTitleOverride ?? chatWindow.title ?? fallbackChatTitle,
             fetchedAt: referenceDate,
             messages: displayMessages,
-            transcriptFrame: context.transcriptRoot.frame
+            transcriptFrame: context.transcriptRoot.frame,
+            readNotes: (collected.cut.map { [(key: "cut", value: $0)] } ?? []) + extraction.notes
         )
     }
 
@@ -254,7 +268,7 @@ struct KakaoTalkTranscriptReader {
         inputElement: UIElement,
         messageLimit: Int,
         frameCache: FrameCache
-    ) -> [UIElement] {
+    ) -> (rows: [UIElement], cut: String?) {
         let targetRowCount = max(messageLimit * 4, 50)
         var rows: [UIElement] = []
 
@@ -343,7 +357,13 @@ struct KakaoTalkTranscriptReader {
         let recentWindow = max(messageLimit * 6, 80)
         let recentRows = Array(sorted.suffix(recentWindow))
         runner.log("read: transcript rows raw=\(rows.count), unique=\(deduplicated.count), filtered=\(sorted.count), recent=\(recentRows.count)")
-        return recentRows
+        // The cut removes nothing when the input really sits under the
+        // transcript. When it does remove rows, say how many: a resolver that
+        // took a message bubble for the input cuts at the TOP of the transcript
+        // and the newest rows are the ones that go (local repro 2026-09-19:
+        // 5/59 -> 3-message parse + fallback, 0/83 -> empty read).
+        let cut = filtered.count < deduplicated.count ? "\(filtered.count)/\(deduplicated.count)" : nil
+        return (recentRows, cut)
     }
 
     private func extractMessages(
@@ -353,7 +373,8 @@ struct KakaoTalkTranscriptReader {
         includeSystemMessages: Bool,
         referenceDate: Date,
         frameCache: FrameCache
-    ) -> [TranscriptMessage] {
+    ) -> (messages: [TranscriptMessage], notes: [(key: String, value: String)]) {
+        var notes: [(key: String, value: String)] = []
         // Each row analysis costs ~30ms of AX round-trips, so the floor of 60
         // made every limit-10 read analyze the entire visible transcript.
         // 3x the limit still leaves ample room for date separators, system
@@ -378,7 +399,14 @@ struct KakaoTalkTranscriptReader {
         // dates, image frames) before resorting to the flat text fallback.
         if messages.count < fallbackThreshold, rowsToAnalyze.count > messages.count * 2 {
             runner.log("read: sparse parse (\(messages.count) messages from \(rowsToAnalyze.count) rows); waiting for row materialization")
+            notes.append((key: "sparse", value: "\(messages.count)/\(rowsToAnalyze.count)"))
             Thread.sleep(forTimeInterval: 0.35)
+            // Are the rows we are about to re-parse still alive? A freshly
+            // opened window rebuilds its transcript table, and rows collected
+            // before that come back childless forever (local repro: 30/30).
+            // One `children` call per row, on the sparse path only.
+            let childless = rowsToAnalyze.filter { $0.children.isEmpty }.count
+            notes.append((key: "held0", value: "\(childless)/\(rowsToAnalyze.count)"))
             messages = parseMessages(
                 from: rowsToAnalyze,
                 transcriptRoot: transcriptRoot,
@@ -390,14 +418,18 @@ struct KakaoTalkTranscriptReader {
         }
 
         runner.log("read: row parser messages=\(messages.count)")
+        if !notes.isEmpty {
+            notes.append((key: "reparse", value: "\(messages.count)"))
+        }
 
         if messages.isEmpty || messages.count < fallbackThreshold {
             let fallback = extractFallbackMessages(from: transcriptRoot, limit: limit, referenceDate: referenceDate)
             runner.log("read: fallback messages=\(fallback.count)")
             messages.append(contentsOf: fallback)
+            notes.append((key: "fb", value: "\(fallback.count)"))
         }
 
-        return Array(deduplicateMessagesPreservingOrder(messages).suffix(limit))
+        return (Array(deduplicateMessagesPreservingOrder(messages).suffix(limit)), notes)
     }
 
     private func parseMessages(

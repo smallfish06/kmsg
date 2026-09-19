@@ -216,6 +216,11 @@ struct ReadCommand: ParsableCommand {
                 )
             }
             profiler.note("rows", String(snapshot.count))
+            // Which path produced them (TranscriptSnapshot.readNotes). Without
+            // this a 9s fallback read and a 0.6s read differ only in `read=`.
+            for readNote in snapshot.readNotes {
+                profiler.note(readNote.key, readNote.value)
+            }
             // The bridge only sees this summary line (not runner.log), so the
             // count of side-judgment failures must ride here: unattributed>0
             // means author fields from this read are not trustworthy verdicts.
@@ -242,10 +247,15 @@ struct ReadCommand: ParsableCommand {
             print("Could not locate chat transcript area.")
             print("Use 'kmsg inspect --window <n>' to inspect the opened chat window.")
             return
-        } catch TranscriptReadError.noMessageRows {
+        } catch TranscriptReadError.noMessageRows(let cut) {
             // An empty chat is a normal state; machine callers need valid JSON.
             runFailed = false
             profiler.note("rows", "0")
+            // ...unless the rows were there and the below-input cut removed
+            // every one of them. Same summary key as the non-empty path.
+            if let cut {
+                profiler.note("cut", cut)
+            }
             if json {
                 print(emptyMessagesJSON(chat: requestedChat))
                 return
