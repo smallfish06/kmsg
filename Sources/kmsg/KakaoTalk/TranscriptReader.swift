@@ -146,6 +146,7 @@ struct TranscriptSnapshot: Sendable {
     ///   cut=<kept>/<rows>     the below-input cut removed rows
     ///   sparse=<msgs>/<rows>  the first parse was sparse and was retried
     ///   held0=<n>/<rows>      of the rows we hold, how many are childless now
+    ///   fresh=<rows>          the rows were collected again for the retry
     ///   reparse=<msgs>        what the retry yielded
     ///   fb=<msgs>             the flat text fallback ran
     /// Diagnostics only. Nothing reads these to decide anything.
@@ -246,7 +247,15 @@ struct KakaoTalkTranscriptReader {
             limit: limit,
             includeSystemMessages: includeSystemMessages,
             referenceDate: referenceDate,
-            frameCache: frameCache
+            frameCache: frameCache,
+            recollectRows: { cache in
+                collectTranscriptRows(
+                    from: context.transcriptRoot,
+                    inputElement: context.inputElement,
+                    messageLimit: limit,
+                    frameCache: cache
+                ).rows
+            }
         )
         let displayMessages = extraction.messages
         guard !displayMessages.isEmpty else {
@@ -372,7 +381,8 @@ struct KakaoTalkTranscriptReader {
         limit: Int,
         includeSystemMessages: Bool,
         referenceDate: Date,
-        frameCache: FrameCache
+        frameCache: FrameCache,
+        recollectRows: (FrameCache) -> [UIElement]
     ) -> (messages: [TranscriptMessage], notes: [(key: String, value: String)]) {
         var notes: [(key: String, value: String)] = []
         // Each row analysis costs ~30ms of AX round-trips, so the floor of 60
@@ -392,29 +402,47 @@ struct KakaoTalkTranscriptReader {
             frameCache: frameCache
         )
 
-        // A freshly opened chat window materializes offscreen rows' AX
-        // subtrees a beat after the visible ones, so a sparse parse right
-        // after opening usually means "not loaded yet", not "short chat".
-        // One short wait and re-parse recovers real rows (author, side,
-        // dates, image frames) before resorting to the flat text fallback.
+        // A sparse parse right after opening means "not loaded yet", not
+        // "short chat" — but waiting on the rows we already hold cannot fix it.
+        // A freshly opened chat window REBUILDS its transcript table once the
+        // chat finishes loading, and the AXRow references collected before that
+        // are dead: every one childless, and dead for good. Re-parsing them
+        // yields nothing however long we wait, so the read fell through to the
+        // flat text fallback — 7-20s, authors unattributed, and few enough
+        // messages that a send's identity check refuses the chat.
+        //
+        // Production, 8.8h on one bridge (2026-09-20, kmsg v1.260919.0 markers):
+        // 46 of 590 reads took this path, 45 of them with held0=N/N and a
+        // re-parse that yielded 0. They were 55% of all time spent reading.
+        //
+        // So collect the rows AGAIN and parse those. A fresh FrameCache goes
+        // with them: the old one only knows the dead rows' frames.
         if messages.count < fallbackThreshold, rowsToAnalyze.count > messages.count * 2 {
-            runner.log("read: sparse parse (\(messages.count) messages from \(rowsToAnalyze.count) rows); waiting for row materialization")
+            runner.log("read: sparse parse (\(messages.count) messages from \(rowsToAnalyze.count) rows); re-collecting rows")
             notes.append((key: "sparse", value: "\(messages.count)/\(rowsToAnalyze.count)"))
             Thread.sleep(forTimeInterval: 0.35)
-            // Are the rows we are about to re-parse still alive? A freshly
-            // opened window rebuilds its transcript table, and rows collected
-            // before that come back childless forever (local repro: 30/30).
-            // One `children` call per row, on the sparse path only.
+            // How many of the rows we hold are childless now — the signature of
+            // the rebuild. One `children` call per row, on this path only.
             let childless = rowsToAnalyze.filter { $0.children.isEmpty }.count
             notes.append((key: "held0", value: "\(childless)/\(rowsToAnalyze.count)"))
-            messages = parseMessages(
-                from: rowsToAnalyze,
+            let freshCache = FrameCache()
+            let freshRows = Array(recollectRows(freshCache).suffix(analysisBudget))
+            let useFresh = !freshRows.isEmpty
+            if useFresh {
+                notes.append((key: "fresh", value: "\(freshRows.count)"))
+            }
+            let reparsed = parseMessages(
+                from: useFresh ? freshRows : rowsToAnalyze,
                 transcriptRoot: transcriptRoot,
                 limit: limit,
                 includeSystemMessages: includeSystemMessages,
                 referenceDate: referenceDate,
-                frameCache: frameCache
+                frameCache: useFresh ? freshCache : frameCache
             )
+            // Never trade a better first parse for a worse second one.
+            if reparsed.count >= messages.count {
+                messages = reparsed
+            }
         }
 
         runner.log("read: row parser messages=\(messages.count)")
