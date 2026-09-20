@@ -200,7 +200,8 @@ struct SendCommand: ParsableCommand {
                     window: resolution.window,
                     fallbackChatTitle: recipient ?? chatID ?? "",
                     anchors: expectAnchors,
-                    minimumMatches: expectMin
+                    minimumMatches: expectMin,
+                    note: { key, value in profiler.note(key, value) }
                 )
             }
             try profiler.phase("type") {

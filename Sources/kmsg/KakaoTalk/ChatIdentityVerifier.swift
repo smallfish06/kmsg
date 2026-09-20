@@ -38,7 +38,13 @@ struct ChatIdentityVerifier {
         fallbackChatTitle: String,
         anchors: [String],
         minimumMatches: Int,
-        transcriptLimit: Int = ChatIdentityVerifier.defaultTranscriptLimit
+        transcriptLimit: Int = ChatIdentityVerifier.defaultTranscriptLimit,
+        // Facts about the read this check ran on, for the caller's summary line.
+        // A refusal is only as good as that read: when it comes back short the
+        // anchors cannot match, and the send is refused although the window is
+        // the right one (production 2026-09-20: "matched 2 of 3 anchors in its
+        // last 5 messages"). Without these the send line shows only `verify=`.
+        note: (String, String) -> Void = { _, _ in }
     ) throws {
         let usable = ChatAnchor.usable(anchors)
         // 앵커가 없으면 확인하지 않는다. 이 플래그를 안 쓰는 호출자(구버전 브릿지, 사람이
@@ -59,6 +65,11 @@ struct ChatIdentityVerifier {
                 "[\(Self.unverifiedCode)] could not read the transcript to confirm this is the right chat: \(error)"
             )
         }
+
+        for readNote in snapshot.readNotes {
+            note(readNote.key, readNote.value)
+        }
+        note("vrows", String(snapshot.count))
 
         let bodies = snapshot.messages.map(\.body)
         let matched = ChatAnchor.matchCount(anchors: anchors, inTranscriptBodies: bodies)
