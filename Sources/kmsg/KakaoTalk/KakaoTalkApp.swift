@@ -279,6 +279,14 @@ public final class KakaoTalkApp: Sendable {
         mainWindow ?? windows.first
     }
 
+    /// Whether a window is the chat list window by the same evidence `chatListWindow` uses.
+    /// A conversation window is titled with the chat's name and has no navigation buttons.
+    public func isChatListWindow(_ window: UIElement) -> Bool {
+        if window.title?.contains("채팅") == true { return true }
+        if window.title == "카카오톡" { return true }
+        return window.findFirst(identifier: "chatrooms") != nil
+    }
+
     /// Get the chat list window
     public var chatListWindow: UIElement? {
         // KakaoTalk 26.x: the chat list window is titled "카카오톡"

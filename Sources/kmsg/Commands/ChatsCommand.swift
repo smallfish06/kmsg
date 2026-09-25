@@ -39,22 +39,50 @@ struct ChatsCommand: ParsableCommand {
         profiler.begin("auth")
         let kakao = try AuthBootstrap.requireAuthenticated(traceAX: traceAX)
         let chatWindowResolver = ChatWindowResolver(kakao: kakao, runner: runner)
-        let windowsBefore = kakao.windows
 
-        // Prefer the chat list window ("카카오톡") over any conversation window
+        // Prefer the chat list window ("카카오톡") over any conversation window.
+        //
+        // 목록 창이 없고 방 창만 떠 있으면 아래 폴백(ensureMainWindow)은 그 방 창을 돌려준다 —
+        // focusedWindow 가 먼저다. 스캐너는 창의 첫 표를 목록으로 읽으므로 그러면 **그 방의 대화
+        // 전사**가 채팅 목록으로 나간다: 행은 멀쩡히 오고(제목 자리에 `오후 8:38` 같은 시각), 빈
+        // 스캔도 친구 목록도 아니라 아래 ⌘2 복구도 안 돈다. talkfriend 2026-09-24 20:50~22:25
+        // local-mac-1: 코드 연결(friend accept)과 그 방 발송 뒤 이 상태로 95분간 read 0·발송 0.
+        // read/send 는 같은 상태를 ChatWindowResolver.ensureChatListWindow 의 ⌘2 로 이미 되살리고
+        // 있었고, chats 만 그 한 걸음이 없었다.
         let mainWindow: UIElement
         let autoOpenedWindow: Bool
-        if let chatListWindow = kakao.chatListWindow {
+        if let chatListWindow = kakao.chatListWindow ?? restoreChatListWindow(kakao: kakao, runner: runner, profiler: profiler) {
             mainWindow = chatListWindow
             autoOpenedWindow = false
             runner.log("chats: using chatListWindow title='\(chatListWindow.title ?? "")'")
         } else if let fallback = kakao.ensureMainWindow(timeout: 5.0, trace: { message in
             runner.log(message)
         }) {
-            mainWindow = fallback
-            autoOpenedWindow = !windowsBefore.contains(where: { existing in
-                CFEqual(existing.axElement, fallback.axElement)
-            })
+            // ⌘2 로 되살린 목록 창은 위의 대기(1.4초)보다 늦게 뜨기도 한다 — 로컬 실측(2026-09-25):
+            // 대기 안에 안 떠서 listrestored=0 인데, 활성화를 거친 이 폴백이 그 창을 잡았다. 그래서
+            // 폴백 뒤에 목록 창을 한 번 더 찾는다.
+            //
+            // 끝내 목록 창이 없고 손에 든 게 방 창이면 그 창을 스캔하지 않는다. 빈 결과는 호출자가
+            // "목록을 못 봤다"로 안전하게 다루지만(브릿지는 부재의 증거로 쓰지 않는다), 전사를
+            // 목록으로 내주면 호출자에게는 방들이 조용한 것으로 보인다. 앱에 창이 하나도 없던
+            // 콜드 스타트는 여기서 목록 창이 떠 이 검사를 통과한다.
+            let listWindow = kakao.chatListWindow ?? (kakao.isChatListWindow(fallback) ? fallback : nil)
+            guard let listWindow else {
+                profiler.note("nolistwindow", "1")
+                runner.log("chats: only a conversation window is open and cmd+2 did not bring the list back — reporting no chats instead of that room's transcript")
+                if json {
+                    try printChatsAsJSON([])
+                    return
+                }
+                print("No chat list window found (only a conversation window is open).")
+                return
+            }
+            mainWindow = listWindow
+            // 목록 창은 이번 실행이 띄웠어도 닫지 않는다. 닫으면 다음 명령이 다시 "방 창만 남은"
+            // 상태에서 시작한다 — 로컬 실측: 되살린 목록 창을 이 규칙이 닫아서 다음 chats 가 또
+            // ⌘2 부터 했다(auth 3.5초 → 6.1초). 방 창이 아닌 한 창을 남겨 두는 편이 모든 호출자에게
+            // 싸다. (예전에는 콜드 스타트에서 띄운 목록 창을 닫아 원래 상태로 돌려 놓았다.)
+            autoOpenedWindow = false
             runner.log("chats: fallback to ensureMainWindow")
         } else {
             print("Could not find a usable KakaoTalk window.")
@@ -195,6 +223,26 @@ struct ChatsCommand: ParsableCommand {
                 print("    └─ \(msg)")
             }
         }
+    }
+
+    /// 방 창만 떠 있을 때 목록 창을 ⌘2 로 되살린다 — ChatWindowResolver.ensureChatListWindow 와 같은
+    /// 복구다. 창이 하나도 없으면(콜드 스타트) 아무것도 안 하고 기존 폴백에 맡긴다.
+    private func restoreChatListWindow(kakao: KakaoTalkApp, runner: AXActionRunner, profiler: PhaseProfiler) -> UIElement? {
+        guard !kakao.windows.isEmpty else {
+            return nil
+        }
+        runner.log("chats: chat list window missing while other windows are open; restoring via cmd+2")
+        kakao.activate()
+        Thread.sleep(forTimeInterval: 0.08)
+        runner.pressCommandTwo()
+        var restored: UIElement?
+        _ = runner.waitUntil(label: "chat list window restore", timeout: 1.4, pollInterval: 0.08, evaluateAfterTimeout: false) {
+            restored = kakao.chatListWindow
+            return restored != nil
+        }
+        // 요약 줄에 남긴다 — 브릿지는 --trace-ax 없이 돌아 runner.log 가 안 보인다.
+        profiler.note("listrestored", restored == nil ? "0" : "1")
+        return restored
     }
 
     private func printChatsAsJSON(_ chats: [ChatListEntry]) throws {
