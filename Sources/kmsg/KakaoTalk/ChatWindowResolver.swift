@@ -287,6 +287,8 @@ struct ChatWindowResolver {
     }
 
     @discardableResult
+    /// 닫은 경로를 요약 줄에 남긴다(`close.via=axclose|button|cmdw|none`). 브릿지는 --trace-ax 없이
+    /// 돌아서 이게 없으면 "느린 닫기"가 어느 경로였는지 프로덕션에서 알 길이 없다.
     func closeWindow(_ window: UIElement) -> Bool {
         let closeAction = "AXClose"
 
@@ -297,6 +299,7 @@ struct ChatWindowResolver {
             do {
                 try window.performAction(closeAction)
                 if waitForWindowClosed(window, label: "close via AXClose") {
+                    note("close.via", "axclose")
                     return true
                 }
             } catch {
@@ -308,6 +311,7 @@ struct ChatWindowResolver {
             do {
                 try closeButton.press()
                 if waitForWindowClosed(window, label: "close via button") {
+                    note("close.via", "button")
                     return true
                 }
             } catch {
@@ -315,9 +319,25 @@ struct ChatWindowResolver {
             }
         }
 
+        // ⌘W 는 닫으려는 창이 아니라 **키 창**을 닫는다. AXRaise 는 창을 앞으로 올릴 뿐 키 창으로
+        // 만든다는 보장이 없어서, 방이 위 두 경로로 안 닫힌 채 목록 창이 키 창이면 ⌘W 가 목록 창을
+        // 닫는다 — 방 창만 남고 목록 창은 활성화로도 안 돌아온다(⌘2 로만). talkfriend 브릿지 로그
+        // 6일치에서 목록 창이 사라진 4건이 전부 0.9초 넘게 걸린 닫기 직후였다(정상 0.4초). 그 느린
+        // 닫기의 일부는 send 가 되살린 목록 창을 다시 닫은 것으로 로컬에서 재현됐고(SendCommand 참고),
+        // 나머지(read 의 0.91초)가 이 폴백이었는지는 관측하지 못했다. 그래서 여기는 방어다: 포커스된
+        // 창이 대상일 때만 누른다. 못 닫은 창은 호출자가 이미 다룬다(send: Escape 후 재시도,
+        // WINDOW_LEFT_OPEN 표식).
+        guard let focused = kakao.focusedWindow, areSameAXElement(focused, window) else {
+            runner.log("close window: cmd+w skipped — the focused window is not the one being closed")
+            note("close.via", "none")
+            note("close.cmdw", "skipped")
+            return false
+        }
         runner.log("close window: fallback via cmd+w")
         runner.pressCommandW()
-        return waitForWindowClosed(window, label: "close via cmd+w")
+        let closed = waitForWindowClosed(window, label: "close via cmd+w")
+        note("close.via", closed ? "cmdw" : "none")
+        return closed
     }
 
     private func resolveExistingWindowOnly(query: String) throws -> ChatWindowResolution {
@@ -1992,19 +2012,21 @@ struct ChatWindowResolver {
     }
 
     private func findCloseButton(in window: UIElement) -> UIElement? {
+        // 창의 표준 닫기 버튼. 타이틀바의 그 버튼이라 창 안 버튼을 뒤질 필요가 없다.
+        if let standard: AXUIElement = window.attributeOptional(kAXCloseButtonAttribute) {
+            return UIElement(standard)
+        }
         let buttons = window.findAll(role: kAXButtonRole, limit: 6, maxNodes: 80)
-        if let match = buttons.first(where: { button in
+        // 닫기로 보이는 버튼만 누른다. 예전에는 못 찾으면 첫 버튼(buttons.first)을 눌렀는데, 방 창의
+        // 첫 버튼은 첨부·프로필 같은 것이라 창은 안 닫히고 엉뚱한 UI 가 열린다 — 그 뒤 ⌘W 로 넘어갔다.
+        return buttons.first(where: { button in
             let joined = [
                 button.identifier ?? "",
                 button.title ?? "",
                 button.axDescription ?? "",
             ].joined(separator: " ").lowercased()
             return joined.contains("close") || joined.contains("닫기")
-        }) {
-            return match
-        }
-
-        return buttons.first
+        })
     }
 
     private func waitForWindowClosed(_ window: UIElement, label: String) -> Bool {

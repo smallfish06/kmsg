@@ -249,15 +249,8 @@ struct SendImageCommand: ParsableCommand {
             print("⚠ WINDOW_LEFT_OPEN: chat window could not be closed after image send")
         }
 
-        if let listWindow = kakao.chatListWindow,
-           !areSameAXElement(listWindow, resolution.window)
-        {
-            if resolver.closeWindow(listWindow) {
-                runner.log("send-image: chat list window closed")
-            } else {
-                runner.log("send-image: chat list window could not be verified")
-            }
-        }
+        // 채팅 목록 창은 닫지 않는다(send 와 같은 이유). 예전에는 방 창을 닫은 뒤 목록 창도 무조건
+        // 닫았다 — 목록 창은 활성화로 안 돌아와서, 닫히면 다음 chats 가 목록을 못 본다.
     }
 
     // A lingering confirmation sheet or send overlay can make AXClose, the

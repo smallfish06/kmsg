@@ -154,9 +154,6 @@ struct SendCommand: ParsableCommand {
             note: { key, value in profiler.note(key, value) }
         )
 
-        // Snapshot before resolution so auto-close only touches windows this send opened.
-        let chatListWasOpen = kakao.chatListWindow != nil
-
         do {
             runner.log("window strategy: focusedWindow -> mainWindow -> windows.first")
             let resolution: ChatWindowResolution
@@ -187,7 +184,6 @@ struct SendCommand: ParsableCommand {
                 defer { profiler.end() }
                 closeWindowsIfNeeded(
                     resolution: resolution,
-                    chatListWasOpen: chatListWasOpen,
                     kakao: kakao,
                     resolver: chatWindowResolver,
                     runner: runner
@@ -368,7 +364,6 @@ struct SendCommand: ParsableCommand {
 
     private func closeWindowsIfNeeded(
         resolution: ChatWindowResolution,
-        chatListWasOpen: Bool,
         kakao: KakaoTalkApp,
         resolver: ChatWindowResolver,
         runner: AXActionRunner
@@ -394,16 +389,14 @@ struct SendCommand: ParsableCommand {
             print("⚠ WINDOW_LEFT_OPEN: chat window could not be closed after send")
         }
 
-        if !chatListWasOpen,
-           let listWindow = kakao.chatListWindow,
-           !areSameAXElement(listWindow, resolution.window)
-        {
-            if resolver.closeWindow(listWindow) {
-                runner.log("send: chat list window closed")
-            } else {
-                runner.log("send: chat list window could not be verified")
-            }
-        }
+        // 채팅 목록 창은 닫지 않는다. 예전에는 "이 send 가 시작할 때 목록 창이 없었으면" 끝에 닫았는데,
+        // 목록 창이 한 번 사라지면 다음 send 가 방을 찾으려고 ⌘2 로 되살렸다가 끝에 다시 닫아 그 상태를
+        // 영속화했다. 목록 창은 활성화로 안 돌아오므로(⌘2 로만) 그동안 chats 는 목록을 못 봤다.
+        // 로컬 재현(2026-09-25, 방 창 하나 열림 + 목록 창 닫힘): 전송은 성공하고 close=1.30초 뒤 목록
+        // 창이 다시 닫혀 방 창만 남았다 — talkfriend 운영 2026-09-24 20:49:48 의 close=1.12초와 같은
+        // 모양이고, 그 직후부터 95분간 chats 가 방 전사를 목록으로 읽었다. (창이 하나도 없으면 auth 가
+        // 목록 창을 먼저 열어 이 스냅샷이 true 가 되므로 재현되지 않는다.)
+        // 목록 창이 떠 있어서 잃는 것은 없다 — 새 메시지를 자동 읽음 처리하는 것은 방 창이다.
     }
 
     // A lingering confirmation sheet or overlay can make AXClose, the close
