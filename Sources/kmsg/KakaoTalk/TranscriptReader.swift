@@ -794,7 +794,7 @@ struct KakaoTalkTranscriptReader {
         var metadataTokensBuffer: [String] = []
         var authorTokensBuffer: [String] = []
         var buttonTitlesBuffer: [String] = []
-        var imageFrames: [CGRect] = []
+        var imageCandidates: [(element: UIElement, frame: CGRect, siblingBody: MessageBodyCandidate?)] = []
         var rowHelpDate: String?
         var linkElementCount = 0
         var urlTokenCount = 0
@@ -805,6 +805,7 @@ struct KakaoTalkTranscriptReader {
             var images: [UIElement] = []
             var buttons: [UIElement] = []
             var links: [UIElement] = []
+            var hasOtherDirectContent = false
 
             for child in container.children {
                 switch child.role {
@@ -819,9 +820,15 @@ struct KakaoTalkTranscriptReader {
                 case kAXLinkRole:
                     links.append(child)
                 default:
-                    break
+                    hasOtherDirectContent = true
                 }
             }
+
+            // Keep the observed sibling relationship before role backfills can
+            // introduce descendants (e.g. caption/OCR text inside a photo).
+            let hasDirectTextImagePair = !directCells.isEmpty && !hasOtherDirectContent
+                && textAreas.count == 1 && images.count == 1
+            var siblingBody: MessageBodyCandidate?
 
             let missingRoles = [
                 textAreas.isEmpty ? kAXTextAreaRole : nil,
@@ -886,12 +893,6 @@ struct KakaoTalkTranscriptReader {
                 urlTokenCount += countURLTokens(in: title)
             }
 
-            for image in images {
-                if let frame = image.frame {
-                    imageFrames.append(frame)
-                }
-            }
-
             linkElementCount += links.count
 
             for textArea in textAreas {
@@ -911,7 +912,15 @@ struct KakaoTalkTranscriptReader {
                     runner.log("read: link title used as fallback")
                 }
 
-                bodyCandidates.append(MessageBodyCandidate(body: resolved, frame: textArea.frame))
+                let candidate = MessageBodyCandidate(body: resolved, frame: frameCache.frame(of: textArea))
+                bodyCandidates.append(candidate)
+                if hasDirectTextImagePair { siblingBody = candidate }
+            }
+
+            for image in images {
+                if let frame = frameCache.frame(of: image) {
+                    imageCandidates.append((image, frame, siblingBody))
+                }
             }
 
             if textAreas.isEmpty, let linkBody = bestLinkBodyCandidate(from: container) {
@@ -930,16 +939,30 @@ struct KakaoTalkTranscriptReader {
         let uniqueButtonTitles = deduplicatePreservingOrder(buttonTitlesBuffer)
         let metadata = parseRowMetadata(tokens: metadataTokensBuffer, authorTokens: authorTokensBuffer)
         let cachedRowFrame = frameCache.frame(of: row)
+        let attachmentMetadataCount = uniqueMetadataTokens.filter(isLikelyAttachmentMetadataToken).count
+        let attachmentActionCount = uniqueButtonTitles.filter(isLikelyAttachmentButtonTitle).count
+        // Attachments are non-image files; images are reported separately via imageCount.
+        let attachmentCount = attachmentMetadataCount + attachmentActionCount
+        let imageFrames = imageCandidates.compactMap { candidate -> CGRect? in
+            // Only remove a leaf decoration paired with the selected plain
+            // body in the very same cell. Retain sender-label evidence above:
+            // this correction must not loosen the existing metadata guards.
+            if imageCandidates.count == 1, linkElementCount == 0, urlTokenCount == 0,
+               attachmentCount == 0,
+               let bestBody, let sibling = candidate.siblingBody,
+               sibling.body == bestBody.body, sibling.frame == bestBody.frame,
+               isPlainTextBubbleBackground(candidate.frame, body: bestBody),
+               isLeafImage(candidate.element) {
+                return nil
+            }
+            return candidate.frame
+        }
         let messageImageFrames = likelyMessageImageFrames(
             imageFrames,
             bodyFrame: bestBody?.frame,
             rowFrame: cachedRowFrame,
             transcriptRoot: transcriptRoot
         )
-        let attachmentMetadataCount = uniqueMetadataTokens.filter(isLikelyAttachmentMetadataToken).count
-        let attachmentActionCount = uniqueButtonTitles.filter(isLikelyAttachmentButtonTitle).count
-        // Attachments are non-image files; images are reported separately via imageCount.
-        let attachmentCount = attachmentMetadataCount + attachmentActionCount
         let hasUnmeasuredLink = linkElementCount > 0 && bestBody?.frame == nil && messageImageFrames.isEmpty
         let sideEvidence = inferMessageSide(
             bodyFrame: bestBody?.frame ?? messageImageFrames.first,
@@ -1222,6 +1245,39 @@ struct KakaoTalkTranscriptReader {
             return true
         }
         return false
+    }
+
+    private func isPlainTextBubbleBackground(_ image: CGRect, body: MessageBodyCandidate) -> Bool {
+        guard let text = body.frame,
+              image.width >= 48, image.height >= 48,
+              [image, text].allSatisfy({ frame in
+                  [frame.origin.x, frame.origin.y, frame.width, frame.height].allSatisfy(\.isFinite)
+                      && frame.width > 0 && frame.height > 0
+              }),
+              !body.body.isEmpty,
+              !["사진", "[사진]", "동영상", "[동영상]", "photo", "[photo]", "video", "[video]",
+                "이모티콘", "[이모티콘]", "emoticon", "[emoticon]", "sticker", "[sticker]"].contains(body.body.lowercased()),
+              !isLikelyAttachmentMetadataToken(body.body)
+        else { return false }
+        // Measured text-bubble chrome: L5/T8/R8/B7. One point allows AX
+        // rounding; broad containment would also swallow real captioned media.
+        let insets = [text.minX - image.minX, text.minY - image.minY,
+                      image.maxX - text.maxX, image.maxY - text.maxY]
+        return zip(insets, [CGFloat(5), 8, 8, 7]).allSatisfy { abs($0 - $1) <= 1 }
+    }
+
+    private func isLeafImage(_ image: UIElement) -> Bool {
+        // One shallow query, only after the structural/geometry checks pass.
+        // Never descend into a real image's accessibility content. Failed AX
+        // reads must not turn an unknown image into a proven decoration.
+        do {
+            let children: [AXUIElement] = try image.attribute(kAXChildrenAttribute)
+            return children.isEmpty
+        } catch AccessibilityError.axError(let error) {
+            return error == .attributeUnsupported
+        } catch {
+            return false
+        }
     }
 
     private func likelyMessageImageFrames(
