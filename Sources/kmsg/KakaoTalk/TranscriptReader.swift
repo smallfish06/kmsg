@@ -11,10 +11,12 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
     let isSystem: Bool
     /// How `author` was decided ("explicit"/"default-me"/"left-chain"/
     /// "left-unresolved"/"left-time-guard"/"unattributed"/...). "unattributed"
-    /// means the side judgment itself failed (missing AX frames on a
-    /// half-rendered window) — author nil there is NOT a "(me)" verdict, and
+    /// means the side judgment failed (missing bounds, ambiguous geometry,
+    /// or an unmeasured link) — author nil there is NOT a "(me)" verdict, and
     /// consumers must not anchor or gate on such rows (talkfriend 2026-08-14).
     let authorSource: String?
+    /// Internal diagnostic only; no message content or new JSON field.
+    let authorUnresolvedReason: String?
     /// How `timeRaw` was decided. "explicit" = this row carries its own time
     /// label; "group-tail" = inherited from the next stamped row on the same
     /// side (KakaoTalk labels only the LAST bubble of a same-minute run, so
@@ -68,6 +70,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
     init(
         author: String?,
         authorSource: String? = nil,
+        authorUnresolvedReason: String? = nil,
         timeRaw: String?,
         timeSource: String? = nil,
         body: String,
@@ -83,6 +86,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
     ) {
         self.author = author
         self.authorSource = authorSource
+        self.authorUnresolvedReason = authorUnresolvedReason
         self.timeRaw = timeRaw
         self.timeSource = timeSource
         self.body = body
@@ -118,6 +122,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         TranscriptMessage(
             author: author,
             authorSource: authorSource,
+            authorUnresolvedReason: authorUnresolvedReason,
             timeRaw: timeRaw,
             timeSource: timeSource,
             body: body,
@@ -149,6 +154,9 @@ struct TranscriptSnapshot: Sendable {
     ///   fresh=<rows>          the rows were collected again for the retry
     ///   reparse=<msgs>        what the retry yielded
     ///   fb=<msgs>             the flat text fallback ran
+    ///   attrretry=1           one fresh parse for unknown tail authors
+    ///   attrcandidate=<a>/<b>  unknown tail before/in candidate (even if rejected)
+    ///   attraccepted=0|1      whether the candidate safely improved attribution
     /// Diagnostics only. Nothing reads these to decide anything.
     var readNotes: [(key: String, value: String)] = []
 
@@ -445,6 +453,42 @@ struct KakaoTalkTranscriptReader {
             }
         }
 
+        // A count-healthy parse can still miss the sender of the latest bubble
+        // (8 rows / 4 unattributed in production). Sparse recovery above never
+        // runs in that case. Re-collect under this SAME transcript root with a
+        // fresh frame cache, once; no focus change, title search or author guess.
+        let attribution = TranscriptAttributionRecovery.recover(messages, evidence: { message in
+            let owner: String?
+            if message.authorSource == "unattributed" {
+                owner = nil
+            } else if let author = message.author {
+                owner = "peer:\(author)"
+            } else {
+                owner = ["left-chain", "left-unresolved", "left-time-guard"].contains(message.authorSource ?? "")
+                    ? "peer" : "self"
+            }
+            return TranscriptAttributionRecovery.Row(
+                identity: [message.body, message.date ?? "", String(message.imageCount), String(message.linkCount), String(message.attachmentCount)],
+                owner: owner, isSystem: message.isSystem
+            )
+        }, reread: {
+            Thread.sleep(forTimeInterval: 0.35)
+            let freshCache = FrameCache()
+            let freshRows = Array(recollectRows(freshCache).suffix(analysisBudget))
+            guard !freshRows.isEmpty else { return [] }
+            return parseMessages(
+                from: freshRows, transcriptRoot: transcriptRoot, limit: limit,
+                includeSystemMessages: includeSystemMessages, referenceDate: referenceDate,
+                frameCache: freshCache
+            )
+        })
+        if attribution.attempted {
+            messages = attribution.messages
+            notes.append((key: "attrretry", value: "1"))
+            notes.append((key: "attrcandidate", value: "\(attribution.unresolvedBefore)/\(attribution.unresolvedAfter)"))
+            notes.append((key: "attraccepted", value: attribution.accepted ? "1" : "0"))
+        }
+
         runner.log("read: row parser messages=\(messages.count)")
         if !notes.isEmpty {
             notes.append((key: "reparse", value: "\(messages.count)"))
@@ -632,6 +676,7 @@ struct KakaoTalkTranscriptReader {
             let message = TranscriptMessage(
                 author: author,
                 authorSource: resolvedAuthor.source,
+                authorUnresolvedReason: resolvedAuthor.source == "unattributed" ? analysis.sideFailure : nil,
                 timeRaw: resolvedTime,
                 timeSource: timeSource,
                 body: bodyCandidate.body,
@@ -872,12 +917,14 @@ struct KakaoTalkTranscriptReader {
         // Attachments are non-image files; images are reported separately via imageCount.
         let attachmentCount = attachmentMetadataCount + attachmentActionCount
         let hasUnmeasuredLink = linkElementCount > 0 && bestBody?.frame == nil && messageImageFrames.isEmpty
-        let side: MessageSide = hasUnmeasuredLink ? .unknown : inferMessageSide(
+        let sideEvidence = inferMessageSide(
             bodyFrame: bestBody?.frame ?? messageImageFrames.first,
             imageFrames: messageImageFrames,
             rowFrame: cachedRowFrame,
             transcriptRoot: transcriptRoot
         )
+        let side: MessageSide = hasUnmeasuredLink ? .unknown : sideEvidence.side
+        let sideFailure = hasUnmeasuredLink ? "unmeasured-link" : sideEvidence.failure
         let systemLikeRow = isLikelySystemRow(
             metadataTokens: uniqueMetadataTokens,
             buttonTitles: uniqueButtonTitles,
@@ -894,7 +941,8 @@ struct KakaoTalkTranscriptReader {
             linkCount: max(linkElementCount, urlTokenCount),
             attachmentCount: attachmentCount,
             isSystemLikeRow: systemLikeRow,
-            axHelpDate: rowHelpDate
+            axHelpDate: rowHelpDate,
+            sideFailure: sideFailure
         )
     }
 
@@ -1222,31 +1270,31 @@ struct KakaoTalkTranscriptReader {
         imageFrames: [CGRect],
         rowFrame: CGRect?,
         transcriptRoot: UIElement
-    ) -> MessageSide {
+    ) -> (side: MessageSide, failure: String?) {
         if let bodyF = bodyFrame {
             for imageFrame in imageFrames {
                 if imageFrame.midX + 10 < bodyF.minX {
-                    return .left
+                    return (.left, nil)
                 }
                 if imageFrame.midX > bodyF.maxX + 10 {
-                    return .right
+                    return (.right, nil)
                 }
             }
         }
 
         let referenceFrame = bodyFrame ?? rowFrame
         guard let candidateFrame = referenceFrame, let transcriptFrame = transcriptRoot.frame else {
-            return .unknown
+            return (.unknown, "missing-frame")
         }
 
         let ratio = (candidateFrame.midX - transcriptFrame.minX) / max(transcriptFrame.width, 1)
         if ratio <= 0.56 {
-            return .left
+            return (.left, nil)
         }
         if ratio >= 0.62 {
-            return .right
+            return (.right, nil)
         }
-        return .unknown
+        return (.unknown, "ambiguous-geometry")
     }
 
     private func resolveAuthorInSegment(
@@ -1660,6 +1708,7 @@ private struct RowAnalysis {
     let attachmentCount: Int
     let isSystemLikeRow: Bool
     let axHelpDate: String?
+    var sideFailure: String? = nil
 
     var imageCount: Int {
         imageFrames.count

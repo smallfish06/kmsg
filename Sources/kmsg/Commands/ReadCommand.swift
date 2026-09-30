@@ -228,6 +228,15 @@ struct ReadCommand: ParsableCommand {
                 "unattributed",
                 String(snapshot.messages.filter { $0.authorSource == "unattributed" }.count)
             )
+            let unknownRows = snapshot.messages.filter { $0.authorSource == "unattributed" }
+            if !unknownRows.isEmpty {
+                let reasons = ["missing-frame", "ambiguous-geometry", "unmeasured-link"]
+                let counts = reasons.map { reason in unknownRows.filter { $0.authorUnresolvedReason == reason }.count }
+                let other = unknownRows.count - counts.reduce(0, +)
+                // m=missing bounds, g=middle geometry, l=unmeasured link,
+                // o=other/fallback. Counts only; never log message content.
+                profiler.note("unattrwhy", "m\(counts[0])/g\(counts[1])/l\(counts[2])/o\(other)")
+            }
             // Rows whose minute is still a backward guess (no readable tail
             // label on their run). Each one may carry the previous sender's
             // minute — in production that is our own last reply's minute —
