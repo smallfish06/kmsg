@@ -170,7 +170,7 @@ class FriendOpenProfileCommandContractTests(unittest.TestCase):
         self.assertLess(send_message, confirm_identity)
         self.assertLess(confirm_identity, result)
         self.assertIn("runner.pressCommandTwo()", source[confirm_identity:])
-        self.assertIn("scanner.scan(in: listWindow, limit: 40", source)
+        self.assertIn("scanner.scan(in: listWindow, limit: scanLimit", source)
         self.assertIn("ChatTextNormalizer.normalizeForMatch(snapshot.discovery.title) == normalizedTitle", source)
         self.assertIn("ChatTextNormalizer.normalizeForMatch(lastMessage) == normalizedOpener", source)
         self.assertIn("if matches.count > 1", source)

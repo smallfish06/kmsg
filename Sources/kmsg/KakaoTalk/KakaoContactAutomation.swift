@@ -1289,9 +1289,17 @@ struct KakaoContactAutomation {
         }
 
         let scanner = ChatListScanner()
-        for attempt in 1...4 {
+        // Opening a room can move it below the unread/pinned conversations.
+        // Repeating the same 40-row prefix can therefore never confirm a
+        // successful accept, even if discovery found the room near the top.
+        // Widen the bounded snapshot on retry; do not resend the opener or stop
+        // at the first title, since all matching rows in the snapshot must still
+        // participate in the ambiguity checks below.
+        let scanLimits = [40, 200, 500, 500]
+        for (attemptIndex, scanLimit) in scanLimits.enumerated() {
+            let attempt = attemptIndex + 1
             let listWindow = kakao.chatListWindow ?? mainListWindow
-            let snapshots = scanner.scan(in: listWindow, limit: 40, trace: { runner.log($0) })
+            let snapshots = scanner.scan(in: listWindow, limit: scanLimit, trace: { runner.log($0) })
 
             if scanner.looksLikeFriendsList(snapshots, in: listWindow, trace: { runner.log($0) }) {
                 runner.log("friend identity attempt \(attempt): main list still shows Friends")
@@ -1335,12 +1343,12 @@ struct KakaoContactAutomation {
                     )
                 }
                 runner.log(
-                    "friend identity: confirmed unique row title='\(match.element.discovery.title)' chat_id='\(chatID)'"
+                    "friend identity: confirmed unique row title='\(match.element.discovery.title)' chat_id='\(chatID)' row=\(match.offset + 1) scanned=\(snapshots.count) limit=\(scanLimit)"
                 )
                 return chatID
             }
 
-            runner.log("friend identity attempt \(attempt): exact title/opener row not visible")
+            runner.log("friend identity attempt \(attempt): exact title/opener row not visible within \(snapshots.count) rows (limit \(scanLimit))")
             Thread.sleep(forTimeInterval: 0.2)
         }
 
