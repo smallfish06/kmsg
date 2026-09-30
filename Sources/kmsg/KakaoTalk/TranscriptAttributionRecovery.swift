@@ -9,12 +9,14 @@ enum TranscriptAttributionRecovery {
         /// fresh snapshot cannot silently replace one identified author with another.
         let owner: String?
         let isSystem: Bool
+        /// Only absent AX bounds justify another immediate rendering attempt.
+        let boundsMissing: Bool
     }
 
-    static func unresolvedTail(_ rows: [Row]) -> Int {
+    static func unresolvedTail(_ rows: [Row], requireMissingBounds: Bool = false) -> Int {
         let lastOwn = rows.lastIndex { !$0.isSystem && $0.owner == "self" }
         return rows.dropFirst(lastOwn.map { $0 + 1 } ?? 0)
-            .filter { !$0.isSystem && $0.owner == nil }.count
+            .filter { !$0.isSystem && $0.owner == nil && (!requireMissingBounds || $0.boundsMissing) }.count
     }
 
     static func recover<Message>(
@@ -24,7 +26,11 @@ enum TranscriptAttributionRecovery {
     ) -> (messages: [Message], attempted: Bool, accepted: Bool, unresolvedBefore: Int, unresolvedAfter: Int) {
         let before = messages.map(evidence)
         let tail = unresolvedTail(before)
-        guard tail > 0 else { return (messages, false, false, 0, 0) }
+        // Stable measured geometry in the ambiguous band cannot be repaired
+        // by waiting 350ms. Do not repeat an expensive parse for that verdict.
+        guard unresolvedTail(before, requireMissingBounds: true) > 0 else {
+            return (messages, false, false, tail, tail)
+        }
 
         // Exactly one fresh parse. Persistent ambiguity belongs to the caller's
         // paced retry, not a native loop holding the desktop indefinitely.

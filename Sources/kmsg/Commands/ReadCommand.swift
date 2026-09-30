@@ -229,13 +229,16 @@ struct ReadCommand: ParsableCommand {
                 String(snapshot.messages.filter { $0.authorSource == "unattributed" }.count)
             )
             let unknownRows = snapshot.messages.filter { $0.authorSource == "unattributed" }
+            let alignedRows = snapshot.messages.filter(\.authorRightAligned).count
+            if alignedRows > 0 { profiler.note("rightaligned", String(alignedRows)) }
             if !unknownRows.isEmpty {
-                let reasons = ["missing-frame", "ambiguous-geometry", "unmeasured-link"]
+                let reasons = ["missing-frame", "ambiguous-geometry", "unmeasured-link", "missing-body-frame"]
                 let counts = reasons.map { reason in unknownRows.filter { $0.authorUnresolvedReason == reason }.count }
                 let other = unknownRows.count - counts.reduce(0, +)
                 // m=missing bounds, g=middle geometry, l=unmeasured link,
-                // o=other/fallback. Counts only; never log message content.
-                profiler.note("unattrwhy", "m\(counts[0])/g\(counts[1])/l\(counts[2])/o\(other)")
+                // b=ambiguous row fallback without body bounds, o=other/fallback.
+                // Counts only; never log message content.
+                profiler.note("unattrwhy", "m\(counts[0])/g\(counts[1])/l\(counts[2])/b\(counts[3])/o\(other)")
             }
             // Rows whose minute is still a backward guess (no readable tail
             // label on their run). Each one may carry the previous sender's

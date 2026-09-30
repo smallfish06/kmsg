@@ -24,6 +24,7 @@ struct Runner { func log(_ value: String) {} }
 struct TranscriptMessage: Equatable {
     let author: String?
     let authorSource: String?
+    var authorUnresolvedReason: String? = "missing-frame"
     let body: String
     let date: String? = "2026-09-30"
     let imageCount = 0, linkCount = 0, attachmentCount = 0
@@ -75,6 +76,15 @@ check("fresh frame cache", recovered.0.caches[0] !== recovered.0.caches[1])
 check("no fallback author inference", recovered.0.fallbacks == 0)
 check("content-free acceptance diagnostic", recovered.2.contains { $0.key == "attraccepted" && $0.value == "1" })
 
+let stableGeometry = initial.map { message in
+    var row = message; row.authorUnresolvedReason = "ambiguous-geometry"; return row
+}
+let noGeometryRetry = run([stableGeometry])
+check("stable measured geometry adds no read or wait", noGeometryRetry.0.parses == 1 && noGeometryRetry.3 == 0)
+let missingBody = initial.map { message in
+    var row = message; row.authorUnresolvedReason = "missing-body-frame"; return row
+}
+check("body absence behind ambiguous row remains retryable", run([missingBody, resolved]).0.parses == 2)
 let persistent = run([initial, initial])
 check("persistent unknown stays unknown", persistent.1 == initial)
 check("persistent unknown bounded", persistent.0.parses == 2 && persistent.3 == 1)
@@ -104,6 +114,8 @@ let missing = diagnostic.inferMessageSide(bodyFrame: nil, imageFrames: [], rowFr
 check("missing frame diagnosed without a sender guess", missing.side == .unknown && missing.failure == "missing-frame")
 let middle = diagnostic.inferMessageSide(bodyFrame: CGRect(x: 58, y: 0, width: 2, height: 10), imageFrames: [], rowFrame: nil, transcriptRoot: root)
 check("ambiguous geometry distinguished", middle.side == .unknown && middle.failure == "ambiguous-geometry")
+let rowFallback = diagnostic.inferMessageSide(bodyFrame: nil, imageFrames: [], rowFrame: CGRect(x: 58, y: 0, width: 2, height: 10), transcriptRoot: root)
+check("ambiguous row fallback retains absent body evidence", rowFallback.side == .unknown && rowFallback.failure == "missing-body-frame")
 let left = diagnostic.inferMessageSide(bodyFrame: CGRect(x: 10, y: 0, width: 20, height: 10), imageFrames: [], rowFrame: nil, transcriptRoot: root)
 check("valid left remains resolved", left.side == .left && left.failure == nil)
 print("OK: count-healthy attribution, bounded ambiguity, snapshot safety, sparse recovery, geometry diagnostics")

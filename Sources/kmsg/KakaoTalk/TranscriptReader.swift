@@ -17,6 +17,8 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
     let authorSource: String?
     /// Internal diagnostic only; no message content or new JSON field.
     let authorUnresolvedReason: String?
+    /// Internal count-only provenance for measured same-snapshot alignment.
+    let authorRightAligned: Bool
     /// How `timeRaw` was decided. "explicit" = this row carries its own time
     /// label; "group-tail" = inherited from the next stamped row on the same
     /// side (KakaoTalk labels only the LAST bubble of a same-minute run, so
@@ -71,6 +73,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         author: String?,
         authorSource: String? = nil,
         authorUnresolvedReason: String? = nil,
+        authorRightAligned: Bool = false,
         timeRaw: String?,
         timeSource: String? = nil,
         body: String,
@@ -87,6 +90,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         self.author = author
         self.authorSource = authorSource
         self.authorUnresolvedReason = authorUnresolvedReason
+        self.authorRightAligned = authorRightAligned
         self.timeRaw = timeRaw
         self.timeSource = timeSource
         self.body = body
@@ -123,6 +127,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
             author: author,
             authorSource: authorSource,
             authorUnresolvedReason: authorUnresolvedReason,
+            authorRightAligned: authorRightAligned,
             timeRaw: timeRaw,
             timeSource: timeSource,
             body: body,
@@ -453,9 +458,9 @@ struct KakaoTalkTranscriptReader {
             }
         }
 
-        // A count-healthy parse can still miss the sender of the latest bubble
-        // (8 rows / 4 unattributed in production). Sparse recovery above never
-        // runs in that case. Re-collect under this SAME transcript root with a
+        // A count-healthy parse can still lack bounds for the latest bubble
+        // even when its message count looks healthy. Sparse recovery above
+        // never runs in that case. Re-collect under this SAME transcript root with a
         // fresh frame cache, once; no focus change, title search or author guess.
         let attribution = TranscriptAttributionRecovery.recover(messages, evidence: { message in
             let owner: String?
@@ -469,7 +474,8 @@ struct KakaoTalkTranscriptReader {
             }
             return TranscriptAttributionRecovery.Row(
                 identity: [message.body, message.date ?? "", String(message.imageCount), String(message.linkCount), String(message.attachmentCount)],
-                owner: owner, isSystem: message.isSystem
+                owner: owner, isSystem: message.isSystem,
+                boundsMissing: ["missing-frame", "missing-body-frame"].contains(message.authorUnresolvedReason ?? "")
             )
         }, reread: {
             Thread.sleep(forTimeInterval: 0.35)
@@ -544,7 +550,24 @@ struct KakaoTalkTranscriptReader {
         if reversedAnalyses.count < rowsToAnalyze.count {
             runner.log("read: row analysis early stop after \(reversedAnalyses.count)/\(rowsToAnalyze.count) rows")
         }
-        let analyses = Array(reversedAnalyses.reversed())
+        var analyses = Array(reversedAnalyses.reversed())
+        // The center of a wide outgoing text bubble can fall in the ambiguous
+        // band even though its right edge matches every short outgoing bubble
+        // exactly. Resolve that geometry before author and time inheritance.
+        if analyses.contains(where: { $0.side == .unknown && $0.bodyCandidate?.frame != nil }) {
+            let aligned = TranscriptRightEdgeAlignment.resolvedRows(analyses.map { analysis in
+                TranscriptRightEdgeAlignment.Row(
+                    bodyFrame: analysis.bodyCandidate?.frame, side: analysis.side.rawValue,
+                    explicitPeer: analysis.explicitAuthor != nil,
+                    richContent: analysis.linkCount > 0 || analysis.imageCount > 0 || analysis.attachmentCount > 0 || analysis.isSystemLikeRow
+                )
+            }, transcriptFrame: transcriptRoot.frame)
+            for index in aligned {
+                analyses[index].side = .right
+                analyses[index].sideFailure = nil
+                analyses[index].rightAligned = true
+            }
+        }
         let groupTails = resolveGroupTailStamps(analyses)
 
         var messages: [TranscriptMessage] = []
@@ -677,6 +700,7 @@ struct KakaoTalkTranscriptReader {
                 author: author,
                 authorSource: resolvedAuthor.source,
                 authorUnresolvedReason: resolvedAuthor.source == "unattributed" ? analysis.sideFailure : nil,
+                authorRightAligned: analysis.rightAligned,
                 timeRaw: resolvedTime,
                 timeSource: timeSource,
                 body: bodyCandidate.body,
@@ -1294,7 +1318,9 @@ struct KakaoTalkTranscriptReader {
         if ratio >= 0.62 {
             return (.right, nil)
         }
-        return (.unknown, "ambiguous-geometry")
+        // A row spans the transcript and is not the measured bubble. Preserve
+        // missing-body evidence separately from a genuinely centered body.
+        return (.unknown, bodyFrame == nil ? "missing-body-frame" : "ambiguous-geometry")
     }
 
     private func resolveAuthorInSegment(
@@ -1701,7 +1727,7 @@ private struct RowAnalysis {
     let bodyCandidate: MessageBodyCandidate?
     let explicitAuthor: String?
     let timeRaw: String?
-    let side: MessageSide
+    var side: MessageSide
     let rowFrame: CGRect?
     let imageFrames: [CGRect]
     let linkCount: Int
@@ -1709,6 +1735,7 @@ private struct RowAnalysis {
     let isSystemLikeRow: Bool
     let axHelpDate: String?
     var sideFailure: String? = nil
+    var rightAligned = false
 
     var imageCount: Int {
         imageFrames.count
