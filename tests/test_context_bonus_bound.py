@@ -67,7 +67,8 @@ final class AXTraversalReadScope {
     func roleAndChildren(of element: UIElement) -> (String?, [UIElement]) { element.roleAndChildren() }
 }
 """
-        whole = stub + context + "\n" + baseline + (ROOT / "tests/fixtures/context_bonus_bound.swift").read_text()
+        evidence = (ROOT / "Sources/kmsg/KakaoTalk/TranscriptReadEvidenceDiagnostics.swift").read_text()
+        whole = stub + evidence + context + "\n" + baseline + (ROOT / "tests/fixtures/context_bonus_bound.swift").read_text()
         cls.whole, whole_raw = cls.compile_and_run("context", whole)
 
         rank = part(context, "        var phase1 = candidates.map", "\n        if let top = scored.first")

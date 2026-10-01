@@ -56,7 +56,8 @@ struct WindowCostReader {
             sdk = subprocess.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], check=True, capture_output=True, text=True)
             sdk_args = ["-sdk", sdk.stdout.strip()]
         binary = folder / "read-cost-check"
-        compiled = subprocess.run(["swiftc", *sdk_args, str(main), "-o", str(binary)], capture_output=True, text=True)
+        evidence = ROOT / "Sources/kmsg/KakaoTalk/TranscriptReadEvidenceDiagnostics.swift"
+        compiled = subprocess.run(["swiftc", *sdk_args, str(evidence), str(main), "-o", str(binary)], capture_output=True, text=True)
         if compiled.returncode:
             raise AssertionError(compiled.stdout + compiled.stderr)
         result = subprocess.run([str(binary)], capture_output=True, text=True)

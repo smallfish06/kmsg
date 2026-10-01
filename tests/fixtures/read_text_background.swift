@@ -7,7 +7,10 @@ typealias AXUIElement = NSObject
 enum AccessibilityError: Error { case axError(AXError); case typeMismatch }
 struct Runner { func log(_ message: String) {} }
 final class UIElement {
-    let axElement = NSObject()
+    var axElement = NSObject()
+    static var identifierValues: [ObjectIdentifier: String] = [:]
+    static var identifierErrors: [ObjectIdentifier: AXError] = [:]
+    static var identifierReads = 0
     let role: String?
     var title: String?
     var stringValue: String?
@@ -27,8 +30,15 @@ final class UIElement {
         self.role = role; bounds = frame; stringValue = value; nodes = children
         for node in nodes { node.parent = self }
     }
+    convenience init(_ element: AXUIElement) { self.init("AXRow"); axElement = element }
     func attribute<T>(_ name: String) throws -> T {
         attributeReads += 1
+        if name == kAXIdentifierAttribute {
+            Self.identifierReads += 1
+            if let error = Self.identifierErrors[ObjectIdentifier(axElement)] { throw AccessibilityError.axError(error) }
+            guard let value = Self.identifierValues[ObjectIdentifier(axElement)] else { throw AccessibilityError.axError(.attributeUnsupported) }
+            return value as! T
+        }
         if invalidChildrenType { throw AccessibilityError.typeMismatch }
         if let error = childrenError { throw AccessibilityError.axError(error) }
         precondition(name == kAXChildrenAttribute)

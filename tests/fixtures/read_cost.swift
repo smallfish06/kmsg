@@ -102,6 +102,8 @@ final class AXPathCacheStore {
     }
 }
 final class FrameCache {
+    var readEvidence: TranscriptReadEvidenceDiagnostics?
+    var lastCollectedRow: NSObject?
     private var seen = Set<Int>(), values = [Int: CGRect]()
     func frame(of element: UIElement) -> CGRect? {
         if seen.contains(element.id) { return values[element.id] }

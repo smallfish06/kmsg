@@ -51,6 +51,6 @@ class NativeObservationTests(unittest.TestCase):
     def test_production_extraction_and_default_off(self):
         harness = production_harness(READER.read_text())
         fixture = (ROOT / "tests/fixtures/native_observation_parser.swift").read_text()
-        helpers = [NATIVE / f"{name}.swift" for name in ["TranscriptAuthorEvidence", "TranscriptRightEdgeAlignment", "TranscriptAttributionRecovery", "TranscriptNativeObservation"]]
+        helpers = [NATIVE / f"{name}.swift" for name in ["TranscriptAuthorEvidence", "TranscriptRightEdgeAlignment", "TranscriptAttributionRecovery", "TranscriptNativeObservation", "TranscriptReadEvidenceDiagnostics"]]
         output = swift_run(harness + fixture, helpers)
         self.assertIn("OK:", output)

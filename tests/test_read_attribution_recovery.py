@@ -19,8 +19,15 @@ import Foundation
 import CoreGraphics
 struct UIElement { let children = [1]; var frame: CGRect? = CGRect(x: 0, y: 0, width: 100, height: 500) }
 enum MessageSide { case left, right, unknown }
-final class TranscriptObservationSources {}
-final class FrameCache { var observationSources: TranscriptObservationSources? }
+final class TranscriptObservationSources {
+    func matches(_ identity: Int?, _ element: Int?) -> Bool { false }
+    func readIdentifier(_ identity: Int) -> TranscriptReadEvidenceDiagnostics.IdentifierSample { .unsupported }
+}
+final class FrameCache {
+    var observationSources: TranscriptObservationSources?
+    var readEvidence: TranscriptReadEvidenceDiagnostics?
+    var lastCollectedRow: Int?
+}
 struct Runner { func log(_ value: String) {} }
 struct TranscriptMessage: Equatable {
     let author: String?
@@ -168,7 +175,8 @@ class ReadAttributionRecoveryTests(unittest.TestCase):
                 if sdk.returncode == 0:
                     sdk_args = ["-sdk", sdk.stdout.strip()]
             observation = ROOT / "Sources/kmsg/KakaoTalk/TranscriptNativeObservation.swift"
-            build = subprocess.run(["swiftc", *sdk_args, str(RECOVERY), str(observation), str(main), "-o", str(binary)], capture_output=True, text=True)
+            diagnostics = ROOT / "Sources/kmsg/KakaoTalk/TranscriptReadEvidenceDiagnostics.swift"
+            build = subprocess.run(["swiftc", *sdk_args, str(RECOVERY), str(observation), str(diagnostics), str(main), "-o", str(binary)], capture_output=True, text=True)
             self.assertEqual(build.returncode, 0, build.stderr)
             result = subprocess.run([str(binary)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

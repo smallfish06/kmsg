@@ -101,7 +101,7 @@ class NativeObservationPassTests(unittest.TestCase):
     def setUpClass(cls):
         source = (NATIVE / "TranscriptReader.swift").read_text()
         helpers = [NATIVE / f"{name}.swift" for name in ["TranscriptAuthorEvidence",
-            "TranscriptRightEdgeAlignment", "TranscriptAttributionRecovery", "TranscriptNativeObservation"]]
+            "TranscriptRightEdgeAlignment", "TranscriptAttributionRecovery", "TranscriptNativeObservation", "TranscriptReadEvidenceDiagnostics"]]
         cls.cases = json.loads(swift_run(production_harness(source) + CASES, helpers))
         path = os.environ.get("KMSG_PARSE_PASS_FIXTURE_REPORT")
         if path:

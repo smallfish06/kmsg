@@ -265,6 +265,9 @@ struct KakaoTalkTranscriptReader {
     ) throws -> TranscriptSnapshot {
         readPhase?("collect")
         let frameCache = FrameCache()
+        if readPhase != nil, TranscriptReadEvidenceDiagnostics.enabled {
+            frameCache.readEvidence = TranscriptReadEvidenceDiagnostics()
+        }
         let collected = collectTranscriptRows(
             from: context.transcriptRoot,
             inputElement: context.inputElement,
@@ -321,6 +324,7 @@ struct KakaoTalkTranscriptReader {
         readCost?.add(.collectCalls)
         let targetRowCount = max(messageLimit * 4, 50)
         var rows: [UIElement] = []
+        var evidenceUnknownRoles = 0, evidenceIncompleteChildren = 0, evidenceFallbacks = 0
 
         // Fast path: every observed KakaoTalk transcript nests rows as
         // AXScrollArea > AXTable > AXRow, so a depth-limited walk over
@@ -341,10 +345,12 @@ struct KakaoTalkTranscriptReader {
                 // but retains the legacy empty-array traversal behavior.
                 let children = container.childrenRead()
                 if !children.complete { readCost?.add(.collectIncompleteChildren) }
+                if !children.complete, frameCache.readEvidence != nil { evidenceIncompleteChildren += 1 }
                 for child in children.children {
                     readCost?.add(.collectShallowVisits)
                     guard let role = child.role else {
                         readCost?.add(.collectUnknownRoles)
+                        if frameCache.readEvidence != nil { evidenceUnknownRoles += 1 }
                         continue
                     }
                     if role == kAXRowRole {
@@ -369,6 +375,7 @@ struct KakaoTalkTranscriptReader {
         }
 
         if rows.isEmpty {
+            if frameCache.readEvidence != nil { evidenceFallbacks += 1 }
             let started = readCost?.mark()
             defer { readCost?.end(.collectContainers, started) }
             readCost?.add(.collectFallbackCalls)
@@ -390,6 +397,7 @@ struct KakaoTalkTranscriptReader {
         }
 
         if rows.isEmpty {
+            if frameCache.readEvidence != nil { evidenceFallbacks += 1 }
             let started = readCost?.mark()
             defer { readCost?.end(.collectRows, started) }
             readCost?.add(.collectFallbackCalls)
@@ -402,6 +410,7 @@ struct KakaoTalkTranscriptReader {
         }
 
         if rows.isEmpty {
+            if frameCache.readEvidence != nil { evidenceFallbacks += 1 }
             let started = readCost?.mark()
             defer { readCost?.end(.collectCells, started) }
             readCost?.add(.collectFallbackCalls)
@@ -446,6 +455,16 @@ struct KakaoTalkTranscriptReader {
         // and the newest rows are the ones that go (local repro 2026-09-19:
         // 5/59 -> 3-message parse + fallback, 0/83 -> empty read).
         let cut = filtered.count < deduplicated.count ? "\(filtered.count)/\(deduplicated.count)" : nil
+        if let evidence = frameCache.readEvidence {
+            // These describe the selected pass's observed collection, not a
+            // complete conversation inventory or permission to mint IDs.
+            evidence.setCollection([rows.count, deduplicated.count, sorted.count, recentRows.count,
+                deduplicated.count - filtered.count, evidenceUnknownRoles, evidenceIncompleteChildren,
+                depth == 4 && rows.count < targetRowCount ? frontier.count : 0,
+                rows.count >= targetRowCount && !frontier.isEmpty ? 1 : 0, evidenceFallbacks,
+                sorted.count - recentRows.count])
+            frameCache.lastCollectedRow = recentRows.last?.axElement
+        }
         return (recentRows, cut)
     }
 
@@ -477,6 +496,7 @@ struct KakaoTalkTranscriptReader {
             var messages: [TranscriptMessage]
             let frameCache: FrameCache
             let observationSources: TranscriptObservationSources?
+            let evidence: TranscriptReadEvidenceDiagnostics.Snapshot?
             var provenance: TranscriptParseProvenance
         }
 
@@ -486,10 +506,12 @@ struct KakaoTalkTranscriptReader {
         func parsePass(from rows: [UIElement], cache: FrameCache,
                        sources: TranscriptObservationSources?, provenance: TranscriptParseProvenance) -> TranscriptParsePass {
             cache.observationSources = sources
+            cache.readEvidence?.resetHelp()
+            let messages = parseMessages(from: rows, transcriptRoot: transcriptRoot, limit: limit,
+                includeSystemMessages: includeSystemMessages, referenceDate: referenceDate, frameCache: cache)
             return TranscriptParsePass(
-                messages: parseMessages(from: rows, transcriptRoot: transcriptRoot, limit: limit,
-                    includeSystemMessages: includeSystemMessages, referenceDate: referenceDate, frameCache: cache),
-                frameCache: cache, observationSources: sources, provenance: provenance
+                messages: messages, frameCache: cache, observationSources: sources,
+                evidence: cache.readEvidence?.snapshot(), provenance: provenance
             )
         }
         // Each row analysis costs ~30ms of AX round-trips, so the floor of 60
@@ -531,6 +553,7 @@ struct KakaoTalkTranscriptReader {
             notes.append((key: "held0", value: "\(childless)/\(rowsToAnalyze.count)"))
             readPhase?("sparse.collect")
             let freshCache = FrameCache()
+            if frameCache.readEvidence != nil { freshCache.readEvidence = TranscriptReadEvidenceDiagnostics() }
             let freshSources = observationsEnabled ? TranscriptObservationSources() : nil
             freshCache.observationSources = freshSources
             let freshRows = Array(recollectRows(freshCache).suffix(analysisBudget))
@@ -579,6 +602,7 @@ struct KakaoTalkTranscriptReader {
             Thread.sleep(forTimeInterval: 0.35)
             readPhase?("attr.collect")
             let freshCache = FrameCache()
+            if frameCache.readEvidence != nil { freshCache.readEvidence = TranscriptReadEvidenceDiagnostics() }
             let freshSources = observationsEnabled ? TranscriptObservationSources() : nil
             freshCache.observationSources = freshSources
             let freshRows = Array(recollectRows(freshCache).suffix(analysisBudget))
@@ -627,6 +651,26 @@ struct KakaoTalkTranscriptReader {
                             message.body, String(message.imageCount), String(message.linkCount), String(message.attachmentCount)]
             )
         }, limit: limit, stable: selected.provenance.permitsCertificate)
+        if let evidence = selected.evidence, let sources = selected.observationSources {
+            readPhase?("evidence")
+            let selectedSources = selection.indices.map { selected.messages[$0].nativeSource }
+            let last = selectedSources.last ?? nil
+            let pass: Int
+            switch selected.provenance {
+            case .initial: pass = 1
+            case .freshSparse: pass = 2
+            case .heldSparse: pass = 3
+            case .retainedAfterSparseFailure: pass = 4
+            case .attributionRecovery: pass = 5
+            case .fallbackMixed: pass = 6
+            }
+            TranscriptReadEvidenceDiagnostics.emit(snapshot: evidence, pass: pass,
+                sources: selectedSources.suffix(3).map { (row: $0?.row, body: $0?.body) },
+                lastRowSourcePresent: last?.row != nil, lastBodySourcePresent: last?.body != nil,
+                lastCollectedRowCompared: last?.row != nil && selected.frameCache.lastCollectedRow != nil,
+                lastCollectedRowMatches: sources.matches(last?.row, selected.frameCache.lastCollectedRow),
+                readIdentifier: { sources.readIdentifier($0) })
+        }
         let observationID = UUID().uuidString.lowercased()
         let observed = selection.indices.enumerated().map { index, sourceIndex in
             var message = selected.messages[sourceIndex]
@@ -1001,6 +1045,7 @@ struct KakaoTalkTranscriptReader {
                 || textAreas.contains { countURLTokens(in: normalizeBodyText($0.stringValue)) > 0 }
             for staticText in staticTexts {
                 let (rawValue, help) = staticText.valueAndHelp()
+                frameCache.readEvidence?.recordHelp(help)
                 if rowHelpDate == nil, let help, let parsed = Self.parseHelpDate(help) {
                     rowHelpDate = parsed
                 }
@@ -1959,6 +2004,8 @@ private enum MessageSide: String, Hashable {
 
 private final class FrameCache {
     var observationSources: TranscriptObservationSources?
+    var readEvidence: TranscriptReadEvidenceDiagnostics?
+    var lastCollectedRow: AXUIElement?
     private var entries: [(element: AXUIElement, frame: CGRect?)] = []
     private var buckets: [CFHashCode: [Int]] = [:]
 
@@ -1995,5 +2042,25 @@ private final class TranscriptObservationSources {
         elements.append(element.axElement)
         buckets[hash, default: []].append(index)
         return index
+    }
+
+    func matches(_ identity: Int?, _ element: AXUIElement?) -> Bool {
+        guard let identity, elements.indices.contains(identity), let element else { return false }
+        return CFEqual(elements[identity], element)
+    }
+
+    func readIdentifier(_ identity: Int) -> TranscriptReadEvidenceDiagnostics.IdentifierSample {
+        guard elements.indices.contains(identity) else { return .failed }
+        do {
+            let value: String = try UIElement(elements[identity]).attribute(kAXIdentifierAttribute)
+            guard value.utf8.count <= 512 else { return .oversized }
+            return .value(value)
+        } catch AccessibilityError.axError(let error) {
+            if error == .attributeUnsupported || error == .notImplemented { return .unsupported }
+            if error == .noValue { return .noValue }
+            return .failed
+        } catch {
+            return .failed
+        }
     }
 }
