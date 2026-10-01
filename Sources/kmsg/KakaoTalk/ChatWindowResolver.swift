@@ -683,12 +683,17 @@ struct ChatWindowResolver {
         var titleNodes = 0
         var contentNodes = 0
         var usedTitleHint = false
+        var hintGate: ChatListTitleHintGate = .noHint
+        var availableRows = 0
         defer {
             noteSeconds("res.scan", scanSeconds)
             note("res.scans", String(scanAttempts))
             note("res.hint", usedTitleHint ? "1" : "0")
             note("res.tnodes", String(titleNodes))
             note("res.cnodes", String(contentNodes))
+            note("res.hgate", String(hintGate.rawValue))
+            if let preferredIndex, preferredIndex >= 0 { note("res.hidx", String(preferredIndex)) }
+            note("res.hcount", String(availableRows))
         }
         let scanStarted = DispatchTime.now()
         let scan = scanner.scanUntilTitle(
@@ -704,6 +709,8 @@ struct ChatWindowResolver {
         titleNodes += scan.titleNodes
         contentNodes += scan.contentNodes
         usedTitleHint = scan.usedTitleHint
+        hintGate = scan.hintGate
+        availableRows = scan.availableRows
         note("res.rows", String(scan.rowsScanned))
         if scan.stoppedEarly {
             note("res.cut", "1")
@@ -745,6 +752,8 @@ struct ChatWindowResolver {
             titleNodes += recovered.titleNodes
             contentNodes += recovered.contentNodes
             usedTitleHint = recovered.usedTitleHint
+            hintGate = recovered.hintGate
+            availableRows = recovered.availableRows
             if let recoveredMatch = recovered.match {
                 runner.log("chat_id: matched row by title '\(query)' after tab recovery")
                 return openMatchedRow(recoveredMatch, query: query, in: chatListWindow, fallbackWindow: fallbackWindow)

@@ -140,6 +140,13 @@ struct ChatListSnapshotItem {
     let sawClockText: Bool
 }
 
+/// Fixed numeric diagnostics; never include a title, preview or AX attribute.
+enum ChatListTitleHintGate: Int {
+    case noHint = 0, shallow = 1, outOfRange = 2, wrongTab = 3
+    case titleMismatch = 4, prefixUnreadable = 5, deadline = 6, changed = 7
+    case hit = 8, hitUnknownTab = 9, containerUnavailable = 10, hintUnreadable = 11
+}
+
 struct ChatListTitleScanResult {
     let match: UIElement?
     /// Complete snapshots are needed only when exact-title lookup misses and
@@ -150,6 +157,8 @@ struct ChatListTitleScanResult {
     let usedTitleHint: Bool
     let titleNodes: Int
     let contentNodes: Int
+    let hintGate: ChatListTitleHintGate
+    let availableRows: Int
 }
 
 struct ChatListScanner {
@@ -227,29 +236,44 @@ struct ChatListScanner {
         guard let container = resolveChatListContainer(in: window, trace: trace) else {
             trace?("chats: chat list container unavailable")
             return ChatListTitleScanResult(match: nil, snapshots: [], stoppedEarly: false,
-                rowsScanned: 0, usedTitleHint: false, titleNodes: 0, contentNodes: 0)
+                rowsScanned: 0, usedTitleHint: false, titleNodes: 0, contentNodes: 0,
+                hintGate: .containerUnavailable, availableRows: 0)
         }
         let rows = collectChatItems(from: container, limit: limit)
         var titleNodes = 0
         var contentNodes = 0
+        var hintGate: ChatListTitleHintGate = .noHint
 
         // The registry position is only a performance hint. Validate it on the
-        // current chat-list tab, then still find the FIRST exact title from the
-        // beginning. Never open the hinted row directly: duplicate titles and
-        // reordered rows must choose the same row as the ordinary full walk.
-        if let preferredIndex,
-           preferredIndex >= Self.minimumTitleHintIndex,
-           preferredIndex < rows.count,
-           Self.detectMainWindowTab(in: window) == .chats
-        {
+        // current rows, then still find the FIRST exact title from the
+        // beginning. Unknown tab headers are not evidence of a wrong window:
+        // the ordinary full walk also accepts the first exact title before
+        // its friends-tab fallback. Known friends/more tabs keep that fallback.
+        // Never open the hinted row directly; duplicate order stays unchanged.
+        var hintTab: MainWindowTab?
+        if let preferredIndex {
+            if preferredIndex < Self.minimumTitleHintIndex {
+                hintGate = .shallow
+            } else if preferredIndex >= rows.count {
+                hintGate = .outOfRange
+            } else {
+                hintTab = Self.detectMainWindowTab(in: window)
+                hintGate = hintTab == .friends || hintTab == .more ? .wrongTab : .titleMismatch
+            }
+        }
+        if let preferredIndex, hintGate == .titleMismatch {
             let hintedContent = collectRowContent(from: rows[preferredIndex], titleOnly: true)
             titleNodes += hintedContent.nodesVisited
-            if extractTitle(from: hintedContent) == expected {
+            let hintedTitle = extractTitle(from: hintedContent)
+            if hintedTitle == "(Unknown Chat)" { hintGate = .hintUnreadable }
+            if hintedTitle == expected {
+                hintGate = .changed
                 for index in 0...preferredIndex {
                     if let shouldStop, index > 0, index % Self.stopCheckStride == 0, shouldStop() {
                         // The caller may use complete prefix snapshots for
                         // registry matching after a budget cut. Keep that
                         // contract: fall back to the original bounded walk.
+                        hintGate = .deadline
                         break
                     }
                     // Re-read even the hinted row: its first validation is not
@@ -260,11 +284,15 @@ struct ChatListScanner {
                     // Missing AX title data cannot certify this prefix as
                     // containing no earlier exact match. Re-read it through
                     // the original path instead of trusting the hint.
-                    if title == "(Unknown Chat)" { break }
+                    if title == "(Unknown Chat)" {
+                        hintGate = .prefixUnreadable
+                        break
+                    }
                     if title == expected {
                         trace?("chats: validated title hint matched first row \(index + 1)")
                         return ChatListTitleScanResult(match: rows[index], snapshots: [], stoppedEarly: false,
-                            rowsScanned: index + 1, usedTitleHint: true, titleNodes: titleNodes, contentNodes: 0)
+                            rowsScanned: index + 1, usedTitleHint: true, titleNodes: titleNodes, contentNodes: 0,
+                            hintGate: hintTab == nil ? .hitUnknownTab : .hit, availableRows: rows.count)
                     }
                 }
                 // AX rows may have changed while walking. Discard the partial
@@ -279,7 +307,8 @@ struct ChatListScanner {
             if let shouldStop, index > 0, index % Self.stopCheckStride == 0, shouldStop() {
                 trace?("chats: title walk stopped early at row \(index) of \(rows.count)")
                 return ChatListTitleScanResult(match: nil, snapshots: snapshots, stoppedEarly: true,
-                    rowsScanned: snapshots.count, usedTitleHint: false, titleNodes: titleNodes, contentNodes: contentNodes)
+                    rowsScanned: snapshots.count, usedTitleHint: false, titleNodes: titleNodes, contentNodes: contentNodes,
+                    hintGate: hintGate, availableRows: rows.count)
             }
             let content = collectRowContent(from: row)
             contentNodes += content.nodesVisited
@@ -297,11 +326,13 @@ struct ChatListScanner {
             if title == expected {
                 trace?("chats: title fast path matched row \(index + 1)")
                 return ChatListTitleScanResult(match: row, snapshots: snapshots, stoppedEarly: false,
-                    rowsScanned: snapshots.count, usedTitleHint: false, titleNodes: titleNodes, contentNodes: contentNodes)
+                    rowsScanned: snapshots.count, usedTitleHint: false, titleNodes: titleNodes, contentNodes: contentNodes,
+                    hintGate: hintGate, availableRows: rows.count)
             }
         }
         return ChatListTitleScanResult(match: nil, snapshots: snapshots, stoppedEarly: false,
-            rowsScanned: snapshots.count, usedTitleHint: false, titleNodes: titleNodes, contentNodes: contentNodes)
+            rowsScanned: snapshots.count, usedTitleHint: false, titleNodes: titleNodes, contentNodes: contentNodes,
+            hintGate: hintGate, availableRows: rows.count)
     }
 
     /// The friends tab masquerades as a chat list: same row container, same

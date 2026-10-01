@@ -117,7 +117,9 @@ func fixture(_ label: String, hinted: Bool) -> (UIElement, Int?, Bool) {
     var header = Node("header", kAXButtonRole, title: "채팅")
     var stop = false
     var containerRole = kAXTableRole
-    switch label {
+    let unknownHeader = label.hasPrefix("unknown/")
+    let scenario = unknownHeader ? String(label.dropFirst("unknown/".count)) : label
+    switch scenario {
     case "duplicate-before-hint": titleNode(rows[5]).value = expected
     case "duplicate-after-hint": titleNode(rows[300]).value = expected
     case "duplicate-order-changed":
@@ -144,18 +146,22 @@ func fixture(_ label: String, hinted: Bool) -> (UIElement, Int?, Bool) {
     case "root-title": rows = (0..<410).map { row($0, title: $0 == 242 ? expected : nil, rootTitle: true) }
     case "duplicate-element": rows.insert(rows[0], at: 6)
     case "budget-stop": stop = true
+    case "no-container": rows = []; containerRole = "group"
+    case "empty-list": rows = []
     case "hint-renamed-during-prefix":
         if hinted {
             rows[0].beforeBatch = { titleNode(rows[242]).value = "Synthetic Renamed" }
         } else { titleNode(rows[242]).value = "Synthetic Renamed" }
     default: break
     }
+    if unknownHeader { header = Node("header", kAXStaticTextRole, value: "Synthetic unknown header") }
     let container = Node("container", containerRole, children: rows)
     return (UIElement(Node("window", "window", children: [header, container])), hint, stop)
 }
 struct Result {
     let match: String?, snapshots: [String], stopped: Bool, hintUsed: Bool
     let scanned: Int, titleNodes: Int, contentNodes: Int, counts: Counts
+    let gate: Int, availableRows: Int
 }
 func run(_ label: String, hinted: Bool) -> Result {
     let (window, hint, stop) = fixture(label, hinted: hinted)
@@ -168,14 +174,18 @@ func run(_ label: String, hinted: Bool) -> Result {
             return "\(snapshot.element.axElement.id)|\(d.title)|\(d.lastMessage ?? "nil")|\(d.listIndex)|\(d.unread ?? -1)|\(snapshot.sawClockText)"
         }, stopped: result.stoppedEarly, hintUsed: result.usedTitleHint,
         scanned: result.rowsScanned, titleNodes: result.titleNodes,
-        contentNodes: result.contentNodes, counts: counts)
+        contentNodes: result.contentNodes, counts: counts,
+        gate: result.hintGate.rawValue, availableRows: result.availableRows)
 }
 func check(_ condition: Bool, _ label: String) { if !condition { fatalError(label) } }
 let labels = ["valid-deep", "duplicate-before-hint", "duplicate-after-hint", "duplicate-order-changed",
     "stale-hint", "reordered-earlier", "reordered-later", "renamed", "normalized-only",
     "out-of-range", "negative-hint", "no-hint", "shallow-hint", "friends-tab", "more-tab",
     "unknown-window", "wrong-header-role", "header-ax-error", "hint-ax-error", "prefix-ax-error",
-    "list-container", "root-title", "duplicate-element", "budget-stop", "hint-renamed-during-prefix"]
+    "list-container", "root-title", "duplicate-element", "budget-stop", "hint-renamed-during-prefix",
+    "unknown/duplicate-before-hint", "unknown/reordered-earlier", "unknown/reordered-later",
+    "unknown/prefix-ax-error", "unknown/hint-ax-error", "unknown/budget-stop",
+    "unknown/hint-renamed-during-prefix", "unknown/normalized-only", "no-container", "empty-list"]
 var records: [[String: Any]] = []
 for label in labels {
     let reference = run(label, hinted: false), candidate = run(label, hinted: true)
@@ -188,6 +198,20 @@ for label in labels {
         check(candidate.counts.preview == 0 && candidate.counts.badge == 0,
               "\(label): title-only path read preview or badge")
         check(candidate.contentNodes == 0, "\(label): hint hit gathered full content")
+    }
+    let scenario = label.hasPrefix("unknown/") ? String(label.dropFirst("unknown/".count)) : label
+    let expectedGates = ["stale-hint": 4, "reordered-earlier": 4, "reordered-later": 4,
+        "renamed": 4, "normalized-only": 4, "out-of-range": 2, "negative-hint": 1,
+        "no-hint": 0, "shallow-hint": 1, "friends-tab": 3, "more-tab": 3,
+        "hint-ax-error": 11, "prefix-ax-error": 5, "budget-stop": 6,
+        "hint-renamed-during-prefix": 7, "no-container": 10, "empty-list": 2]
+    if let gate = expectedGates[scenario] { check(candidate.gate == gate, "\(label): wrong gate diagnostic") }
+    if label == "unknown-window" || label == "header-ax-error" || label == "wrong-header-role"
+        || (label.hasPrefix("unknown/") && candidate.hintUsed) {
+        check(candidate.hintUsed && candidate.gate == 9, "\(label): unknown header must preserve safe first-title path")
+    }
+    if label == "friends-tab" || label == "more-tab" {
+        check(!candidate.hintUsed && candidate.titleNodes == 0, "\(label): known wrong tab must keep full fallback")
     }
     if label == "valid-deep" {
         check(candidate.match == "row-242", "deep target")
@@ -205,7 +229,8 @@ for label in labels {
     records.append(["case": label, "match": candidate.match ?? "none", "snapshots": candidate.snapshots.count,
         "stoppedEarly": candidate.stopped, "hintUsed": candidate.hintUsed,
         "rowsScanned": candidate.scanned, "titleNodes": candidate.titleNodes,
-        "contentNodes": candidate.contentNodes, "reference": reference.counts.json,
+        "contentNodes": candidate.contentNodes, "hintGate": candidate.gate,
+        "availableRows": candidate.availableRows, "reference": reference.counts.json,
         "candidate": candidate.counts.json])
 }
 let output = try JSONSerialization.data(withJSONObject: records, options: [.sortedKeys])
@@ -231,7 +256,7 @@ class ChatListTitleHintTests(unittest.TestCase):
             run = subprocess.run([str(binary)], capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
             records = json.loads(run.stdout)
-            self.assertEqual(len(records), 25)
+            self.assertEqual(len(records), 35)
             if os.environ.get("KMSG_SYNTHETIC_SCANNER_REPORT"):
                 Path(os.environ["KMSG_SYNTHETIC_SCANNER_REPORT"]).write_text(json.dumps(records, indent=2) + "\n")
 
