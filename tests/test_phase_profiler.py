@@ -1,5 +1,7 @@
+import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +14,7 @@ class PhaseProfilerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.temp.cleanup)
         folder = Path(cls.temp.name)
         main = folder / "main.swift"
         main.write_text('''
@@ -41,14 +44,19 @@ text.begin("auth")
 text.emitSummary(status: "ok")
 ''', encoding="utf-8")
         cls.binary = folder / "profiler-test"
-        subprocess.run([
-            "swiftc", str(ROOT / "Sources/kmsg/Accessibility/PhaseProfiler.swift"),
+        # setup-swift's standalone toolchain does not discover the macOS SDK
+        # automatically, unlike Xcode's swiftc used by local development.
+        sdk_args = []
+        if sys.platform == "darwin" and not os.environ.get("SDKROOT"):
+            sdk = subprocess.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"],
+                                 check=True, capture_output=True, text=True)
+            sdk_args = ["-sdk", sdk.stdout.strip()]
+        build = subprocess.run([
+            "swiftc", *sdk_args, str(ROOT / "Sources/kmsg/Accessibility/PhaseProfiler.swift"),
             str(main), "-o", str(cls.binary),
-        ], check=True, capture_output=True, text=True)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.temp.cleanup()
+        ], capture_output=True, text=True)
+        if build.returncode:
+            raise RuntimeError(f"Profiler harness compilation failed:\n{build.stdout}{build.stderr}")
 
     def test_success_and_failure_keep_cleanup_and_emit_one_summary(self):
         for mode, status in [("ok", "ok"), ("fail", "fail")]:
