@@ -140,6 +140,18 @@ struct ChatListSnapshotItem {
     let sawClockText: Bool
 }
 
+struct ChatListTitleScanResult {
+    let match: UIElement?
+    /// Complete snapshots are needed only when exact-title lookup misses and
+    /// the caller continues with registry matching. A title-only hit has none.
+    let snapshots: [ChatListSnapshotItem]
+    let stoppedEarly: Bool
+    let rowsScanned: Int
+    let usedTitleHint: Bool
+    let titleNodes: Int
+    let contentNodes: Int
+}
+
 struct ChatListScanner {
     func scan(in window: UIElement, limit: Int, trace: ((String) -> Void)? = nil) -> [ChatListSnapshotItem] {
         guard let container = resolveChatListContainer(in: window, trace: trace) else {
@@ -171,7 +183,7 @@ struct ChatListScanner {
         return snapshots
     }
 
-    /// 한 번만 걷는 제목 조회.
+    /// Exact-title lookup with complete snapshots on a miss.
     ///
     /// 제목이 정확히 맞는 행을 만나면 거기서 멈추고(흔한 경우 — 방금 메시지를 받은 방은
     /// 목록 최상단에 있다), 끝까지 못 만나면 걸으면서 모은 스냅샷을 그대로 돌려준다.
@@ -182,8 +194,12 @@ struct ChatListScanner {
     /// 경로다 — 프로덕션 실측(2026-08-09)에서 목록 구간이 resolve 비용의 대부분이었다
     /// (res.list 합 568s / res.search 합 116s, n=102 vs 44).
     ///
-    /// 적중 시 행당 비용은 조금 오른다(titleOnly 대신 전체 내용을 모은다). 대신 그 경우는
-    /// 몇 행 만에 끝나고, 미스는 walk 가 절반이 된다.
+    /// A currently validated deep registry index enables a title-only prefix
+    /// walk. It still starts at the first row, so duplicate titles keep their
+    /// original ordering. Invalid hints and uncertain prefix reads fall back
+    /// to the full-content path below; partial title data never reaches the
+    /// registry. A tree change during that prefix can therefore require two
+    /// walks. No new AX element or identity cache is retained between calls.
     /// `shouldStop` 은 `stopCheckStride` 행마다 한 번만 묻는다.
     ///
     /// 종전에는 스캔 한 번을 통째로 블로킹으로 두고 예산은 스캔 **앞**에서만 끊었다.
@@ -196,27 +212,77 @@ struct ChatListScanner {
     /// 상태이고, 그건 이 코드가 이미 다루던 경우다.
     static let stopCheckStride = 25
 
+    // Header/hint validation has fixed AX cost. Shallow lookups keep the
+    // original single walk; the fast path is for a previously deep row.
+    static let minimumTitleHintIndex = 25
+
     func scanUntilTitle(
         _ expected: String,
         in window: UIElement,
         limit: Int,
+        preferredIndex: Int? = nil,
         shouldStop: (() -> Bool)? = nil,
         trace: ((String) -> Void)? = nil
-    ) -> (match: UIElement?, snapshots: [ChatListSnapshotItem], stoppedEarly: Bool) {
+    ) -> ChatListTitleScanResult {
         guard let container = resolveChatListContainer(in: window, trace: trace) else {
             trace?("chats: chat list container unavailable")
-            return (nil, [], false)
+            return ChatListTitleScanResult(match: nil, snapshots: [], stoppedEarly: false,
+                rowsScanned: 0, usedTitleHint: false, titleNodes: 0, contentNodes: 0)
         }
         let rows = collectChatItems(from: container, limit: limit)
+        var titleNodes = 0
+        var contentNodes = 0
+
+        // The registry position is only a performance hint. Validate it on the
+        // current chat-list tab, then still find the FIRST exact title from the
+        // beginning. Never open the hinted row directly: duplicate titles and
+        // reordered rows must choose the same row as the ordinary full walk.
+        if let preferredIndex,
+           preferredIndex >= Self.minimumTitleHintIndex,
+           preferredIndex < rows.count,
+           Self.detectMainWindowTab(in: window) == .chats
+        {
+            let hintedContent = collectRowContent(from: rows[preferredIndex], titleOnly: true)
+            titleNodes += hintedContent.nodesVisited
+            if extractTitle(from: hintedContent) == expected {
+                for index in 0...preferredIndex {
+                    if let shouldStop, index > 0, index % Self.stopCheckStride == 0, shouldStop() {
+                        // The caller may use complete prefix snapshots for
+                        // registry matching after a budget cut. Keep that
+                        // contract: fall back to the original bounded walk.
+                        break
+                    }
+                    // Re-read even the hinted row: its first validation is not
+                    // authority to accept a stale title after the prefix walk.
+                    let content = collectRowContent(from: rows[index], titleOnly: true)
+                    titleNodes += content.nodesVisited
+                    let title = extractTitle(from: content)
+                    // Missing AX title data cannot certify this prefix as
+                    // containing no earlier exact match. Re-read it through
+                    // the original path instead of trusting the hint.
+                    if title == "(Unknown Chat)" { break }
+                    if title == expected {
+                        trace?("chats: validated title hint matched first row \(index + 1)")
+                        return ChatListTitleScanResult(match: rows[index], snapshots: [], stoppedEarly: false,
+                            rowsScanned: index + 1, usedTitleHint: true, titleNodes: titleNodes, contentNodes: 0)
+                    }
+                }
+                // AX rows may have changed while walking. Discard the partial
+                // title data; the original path gathers complete snapshots.
+            }
+        }
+
         var snapshots: [ChatListSnapshotItem] = []
         snapshots.reserveCapacity(rows.count)
 
         for (index, row) in rows.enumerated() {
             if let shouldStop, index > 0, index % Self.stopCheckStride == 0, shouldStop() {
                 trace?("chats: title walk stopped early at row \(index) of \(rows.count)")
-                return (nil, snapshots, true)
+                return ChatListTitleScanResult(match: nil, snapshots: snapshots, stoppedEarly: true,
+                    rowsScanned: snapshots.count, usedTitleHint: false, titleNodes: titleNodes, contentNodes: contentNodes)
             }
             let content = collectRowContent(from: row)
+            contentNodes += content.nodesVisited
             let title = extractTitle(from: content)
             let preview = extractPreview(from: content, title: title)
             let unread = extractUnread(from: content)
@@ -230,10 +296,12 @@ struct ChatListScanner {
             // 제목은 정확히 비교한다 — 기대값 자체가 이전 스캔의 extractTitle 에서 왔다.
             if title == expected {
                 trace?("chats: title fast path matched row \(index + 1)")
-                return (row, snapshots, false)
+                return ChatListTitleScanResult(match: row, snapshots: snapshots, stoppedEarly: false,
+                    rowsScanned: snapshots.count, usedTitleHint: false, titleNodes: titleNodes, contentNodes: contentNodes)
             }
         }
-        return (nil, snapshots, false)
+        return ChatListTitleScanResult(match: nil, snapshots: snapshots, stoppedEarly: false,
+            rowsScanned: snapshots.count, usedTitleHint: false, titleNodes: titleNodes, contentNodes: contentNodes)
     }
 
     /// The friends tab masquerades as a chat list: same row container, same

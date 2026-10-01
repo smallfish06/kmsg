@@ -257,6 +257,7 @@ struct ChatWindowResolver {
             let chatWindow = openChatListRow(
                 chatID: chatID,
                 query: query,
+                preferredIndex: record.lastSeenIndex,
                 in: chatListWindow,
                 fallbackWindow: usableWindow,
                 deadline: deadline
@@ -642,6 +643,7 @@ struct ChatWindowResolver {
     private func openChatListRow(
         chatID: String,
         query: String,
+        preferredIndex: Int?,
         in chatListWindow: UIElement,
         fallbackWindow: UIElement,
         deadline: ResolveDeadline
@@ -674,21 +676,45 @@ struct ChatWindowResolver {
             runner.log("chat_id: \(deadline.describe("the chat list scan"))")
             return nil
         }
-        var (titleMatch, snapshots, stoppedEarly) = scanner.scanUntilTitle(
+        // These are nested measurements inside res.list, not additional
+        // top-level phases. Include a friends-tab recovery scan, if needed.
+        var scanSeconds = 0.0
+        var scanAttempts = 0
+        var titleNodes = 0
+        var contentNodes = 0
+        var usedTitleHint = false
+        defer {
+            noteSeconds("res.scan", scanSeconds)
+            note("res.scans", String(scanAttempts))
+            note("res.hint", usedTitleHint ? "1" : "0")
+            note("res.tnodes", String(titleNodes))
+            note("res.cnodes", String(contentNodes))
+        }
+        let scanStarted = DispatchTime.now()
+        let scan = scanner.scanUntilTitle(
             query,
             in: chatListWindow,
             limit: titleScanHorizon,
+            preferredIndex: preferredIndex,
             shouldStop: { deadline.isExceeded },
             trace: { message in runner.log(message) }
         )
-        note("res.rows", String(snapshots.count))
-        if stoppedEarly {
+        scanSeconds += Double(DispatchTime.now().uptimeNanoseconds &- scanStarted.uptimeNanoseconds) / 1_000_000_000
+        scanAttempts += 1
+        titleNodes += scan.titleNodes
+        contentNodes += scan.contentNodes
+        usedTitleHint = scan.usedTitleHint
+        note("res.rows", String(scan.rowsScanned))
+        if scan.stoppedEarly {
             note("res.cut", "1")
         }
+        let titleMatch = scan.match
         if let titleMatch {
             runner.log("chat_id: matched row by title '\(query)'")
             return openMatchedRow(titleMatch, query: query, in: chatListWindow, fallbackWindow: fallbackWindow)
         }
+
+        var snapshots = scan.snapshots
 
         guard !snapshots.isEmpty else {
             runner.log("chat_id: chat list scan returned no rows")
@@ -705,13 +731,20 @@ struct ChatWindowResolver {
             kakao.activate()
             runner.pressCommandTwo()
             Thread.sleep(forTimeInterval: 0.4)
+            let recoveryScanStarted = DispatchTime.now()
             let recovered = scanner.scanUntilTitle(
                 query,
                 in: chatListWindow,
                 limit: titleScanHorizon,
+                preferredIndex: preferredIndex,
                 shouldStop: { deadline.isExceeded },
                 trace: { message in runner.log(message) }
             )
+            scanSeconds += Double(DispatchTime.now().uptimeNanoseconds &- recoveryScanStarted.uptimeNanoseconds) / 1_000_000_000
+            scanAttempts += 1
+            titleNodes += recovered.titleNodes
+            contentNodes += recovered.contentNodes
+            usedTitleHint = recovered.usedTitleHint
             if let recoveredMatch = recovered.match {
                 runner.log("chat_id: matched row by title '\(query)' after tab recovery")
                 return openMatchedRow(recoveredMatch, query: query, in: chatListWindow, fallbackWindow: fallbackWindow)
@@ -776,6 +809,8 @@ struct ChatWindowResolver {
         in chatListWindow: UIElement,
         fallbackWindow: UIElement
     ) -> UIElement? {
+        let openStarted = DispatchTime.now()
+        defer { noteSeconds("res.rowopen", Double(DispatchTime.now().uptimeNanoseconds &- openStarted.uptimeNanoseconds) / 1_000_000_000) }
         kakao.activate()
         _ = tryRaiseWindow(chatListWindow)
         acceptedListPaneTitle = nil
