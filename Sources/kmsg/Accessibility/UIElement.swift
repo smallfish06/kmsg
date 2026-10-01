@@ -229,6 +229,38 @@ public final class UIElement: @unchecked Sendable {
         }
     }
 
+    /// One fresh string snapshot, preserving the difference between an absent
+    /// optional attribute and an uncertain batch slot. The caller rereads only
+    /// the uncertain slots through the original scalar API.
+    func optionalStringAttributesRead(_ names: [String]) -> (values: [String?], scalarFallbackIndices: [Int]) {
+        var values: CFArray?
+        let error = AXUIElementCopyMultipleAttributeValues(
+            axElement, names as CFArray, AXCopyMultipleAttributeOptions(), &values
+        )
+        guard error == .success, let raw = values as? [AnyObject], raw.count == names.count else {
+            return (Array(repeating: nil, count: names.count), Array(names.indices))
+        }
+        var fallback: [Int] = []
+        let strings: [String?] = raw.enumerated().map { index, value in
+            if let text = value as? String { return text }
+            if CFGetTypeID(value) == AXValueGetTypeID() {
+                let axValue = unsafeDowncast(value, to: AXValue.self)
+                if AXValueGetType(axValue) == .axError {
+                    var slotError = AXError.success
+                    if AXValueGetValue(axValue, .axError, &slotError),
+                       slotError == .attributeUnsupported || slotError == .noValue {
+                        return nil
+                    }
+                }
+            }
+            // NSNull, type mismatches and transient AX errors are not an
+            // established absence. Preserve scalar error/type semantics.
+            fallback.append(index)
+            return nil
+        }
+        return (strings, fallback)
+    }
+
     /// Role and children in one round-trip — the two attributes every
     /// breadth-first traversal needs at each visited node.
     public func roleAndChildren() -> (role: String?, children: [UIElement]) {

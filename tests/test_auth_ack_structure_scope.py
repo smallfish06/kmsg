@@ -21,6 +21,7 @@ AUTH = ROOT / 'Sources/kmsg/Auth/KakaoTalkAuthenticator.swift'
 UI = ROOT / 'Sources/kmsg/Accessibility/UIElement.swift'
 SCOPE = ROOT / 'Sources/kmsg/Accessibility/AXTraversalReadScope.swift'
 DIAGNOSTICS = ROOT / 'Sources/kmsg/Auth/AuthAcknowledgementDiagnostics.swift'
+TEXT_READER = ROOT / 'Sources/kmsg/Auth/AuthTextAttributeReader.swift'
 
 
 def swiftc_command():
@@ -63,11 +64,15 @@ def instrument_walks(text):
 
 STUBS = r'''
 import Foundation
+import ApplicationServices
 let kAXRoleAttribute = "role", kAXChildrenAttribute = "children"
+let kAXTitleAttribute = "title", kAXDescriptionAttribute = "description"
+let kAXValueAttribute = "value", kAXIdentifierAttribute = "identifier"
 let kAXButtonRole = "button", kAXStaticTextRole = "static", kAXGroupRole = "group"
 struct Counts { var batch = 0, single = 0; var total: Int { batch + single } }
 struct Walk { var root: String; var nodes: [String] }
 var counts = Counts(), walks: [Walk] = [], notes: [String:String] = [:], diagnosticLines: [String] = []
+var scalarTextReadNames: [String] = [], textBatchRequestNames: [[String]] = []
 var hashCollision = false
 public final class Node {
     let id: String
@@ -94,7 +99,13 @@ public final class UIElement {
         return (axElement === world.system ? world.systemFocus : world.appFocus).map(UIElement.init)
     }
     var parent: UIElement? { counts.single += 1; return axElement.parent.map(UIElement.init) }
-    var title: String? { counts.single += 1; return axElement.title }
+    var title: String? {
+        counts.single += 1
+        if CommandLine.arguments[1] == "text-negative-boundary", axElement === world.acknowledgement {
+            world.mutated = true; axElement.value = "already logged in"
+        }
+        return axElement.title
+    }
     var axDescription: String? { counts.single += 1; return axElement.description }
     var stringValue: String? { counts.single += 1; return axElement.value }
     var identifier: String? { counts.single += 1; return axElement.identifier }
@@ -109,7 +120,14 @@ public final class UIElement {
             axElement.childReads += 1; axElement.beforeChildren?(axElement)
             return (axElement.childrenUnavailable ? nil : axElement.children) as? T
         }
-        return nil
+        scalarTextReadNames.append(name)
+        switch name {
+        case kAXTitleAttribute: return axElement.title as? T
+        case kAXDescriptionAttribute: return axElement.description as? T
+        case kAXValueAttribute: return axElement.value as? T
+        case kAXIdentifierAttribute: return axElement.identifier as? T
+        default: return nil
+        }
     }
     func batchAttributes(_ names: [String]) -> [Any?] {
         counts.batch += 1; axElement.batches += 1; axElement.beforeBatch?(axElement)
@@ -120,6 +138,43 @@ public final class UIElement {
         }
     }
 // UI_METHODS
+}
+// These fake IPCs exercise the production batch classifier, including real
+// AXValue error slots. No app process or AXUIElement is created by the fixture.
+func textSlotError(_ code: AXError) -> AnyObject {
+    var value = code
+    return AXValueCreate(.axError, &value)!
+}
+func AXUIElementCopyMultipleAttributeValues(_ node: Node, _ names: CFArray,
+    _ options: AXCopyMultipleAttributeOptions, _ values: UnsafeMutablePointer<CFArray?>) -> AXError {
+    counts.batch += 1
+    let scenario = CommandLine.arguments[1]
+    let labels = names as! [String]
+    textBatchRequestNames.append(labels)
+    if scenario == "text-batch-failure" { return .cannotComplete }
+    if scenario == "text-circuit-reset", textBatchRequestNames.count == 1 { return .cannotComplete }
+    if scenario == "text-nil-array" { return .success }
+    var raw: [AnyObject] = labels.map { label in
+        let text: String?
+        switch label {
+        case kAXTitleAttribute: text = node.title
+        case kAXDescriptionAttribute: text = node.description
+        case kAXValueAttribute: text = node.value
+        default: text = node.identifier
+        }
+        if let text { return text as NSString }
+        return textSlotError(scenario == "text-no-value" ? .noValue : .attributeUnsupported)
+    }
+    if scenario == "text-wrong-length" { raw.removeLast() }
+    if scenario == "text-slot-error" { raw[2] = textSlotError(.cannotComplete) }
+    if scenario == "text-slot-type" { raw[2] = NSNumber(value: 123) }
+    if scenario == "text-slot-null" { raw[2] = NSNull() }
+    if scenario == "text-all-slot-error" { raw = raw.map { _ in textSlotError(.cannotComplete) } }
+    if scenario == "text-negative-boundary", node === world.acknowledgement {
+        world.mutated = true; node.value = "already logged in"
+    }
+    values.pointee = raw as CFArray
+    return .success
 }
 final class KakaoTalkApp {
     var focusedWindow: UIElement? {
@@ -205,6 +260,40 @@ default: fixtureRows = many ? 100 : 30
 world = World(rows: fixtureRows)
 hashCollision = scenario == "hash-collision"
 switch scenario {
+case "yui906-numeric-model":
+    // Matches one measured numeric shape, not a captured production UI graph.
+    let focused = Node("model-focused", "pane", children: (0..<126).map {
+        Node("model-focus-leaf-\($0)", "static", value: "ordinary fixture")
+    })
+    let children = (0..<133).map { Node("model-parent-leaf-\($0)", "static", value: "ordinary fixture") }
+    children[0].childrenUnavailable = true
+    let parent = Node("model-parent", "pane", children: children + [focused])
+    world.window.children = []
+    for index in 0..<142 {
+        let filler = Node("model-header-\(index)", "text")
+        filler.childrenUnavailable = index < 13
+        world.window.append(filler)
+    }
+    world.window.append(parent)
+    world.appFocus = focused; world.systemFocus = focused
+case "text-negative-boundary":
+    world.addAck()
+    world.appFocus = nil; world.systemFocus = nil; world.app.children = []
+    world.acknowledgement?.value = finalReference ? "already logged in" : "ordinary fixture"
+case "text-empty-strings":
+    for row in world.table.children {
+        for node in [row] + row.children {
+            node.title = ""; node.description = ""; node.value = ""; node.identifier = ""
+        }
+    }
+case "text-positive", "text-positive-changes":
+    world.addAck()
+    if scenario == "text-positive-changes" {
+        if finalReference { world.acknowledgement?.value = "unrelated prompt"; world.ok?.title = "Cancel" }
+        else { world.beforeRoots = { count in
+            if count == 2 { world.mutated = true; world.acknowledgement?.value = "unrelated prompt"; world.ok?.title = "Cancel" }
+        } }
+    }
 case "no-focus": world.appFocus = nil; world.systemFocus = nil
 case "single-root":
     world.appFocus = nil; world.systemFocus = nil; world.focusedWindow = nil; world.mainWindow = nil
@@ -275,12 +364,14 @@ var answer = auth.inspect()
 if scenario == "scope-isolation" {
     world.addAck(); answer = FixtureAuthenticator().inspect()
 }
+if scenario == "text-circuit-reset" { answer = auth.inspect() }
 let report: [String: Any] = [
     "scenario": scenario, "selected": answer, "batchCalls": counts.batch,
     "singleCalls": counts.single, "totalAXCalls": counts.total,
     "walks": walks.map { ["root": $0.root, "nodes": $0.nodes] },
     "notes": notes, "rootCollections": world.rootCollections, "mutated": world.mutated,
     "diagnostics": diagnosticLines,
+    "scalarTextReadNames": scalarTextReadNames, "textBatchRequestNames": textBatchRequestNames,
 ]
 let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
 print(String(data: data, encoding: .utf8)!)
@@ -291,10 +382,14 @@ STATIC = ['small', 'overlapping', 'overlapping-260', 'no-focus', 'single-root', 
           'role-wrong-type', 'children-error-role-valid', 'uncertain-leaves', 'empty-children',
           'hash-collision', 'scope-isolation', 'admission-below', 'admission-above', 'many-root-small',
           'partly-shared', 'cycle', 'large-children', 'limit-entries-before', 'limit-entries-after',
-          'limit-children-before', 'limit-children-after']
+          'limit-children-before', 'limit-children-after', 'yui906-numeric-model', 'text-no-value',
+          'text-batch-failure', 'text-wrong-length', 'text-slot-error', 'text-slot-type',
+          'text-slot-null', 'text-all-slot-error', 'text-positive', 'text-nil-array',
+          'text-empty-strings', 'text-circuit-reset']
 DYNAMIC = ['late-child', 'late-role', 'late-text', 'positive-text-changes', 'window-added',
-           'focus-changes', 'window-order-changes', 'root-child-changes']
+           'focus-changes', 'window-order-changes', 'root-child-changes', 'text-positive-changes']
 TRANSIENT = ['transient-role-error', 'transient-children-error', 'children-order-changes']
+TIMING_BOUNDARY = ['text-negative-boundary']
 
 
 class AuthAcknowledgementScopeTests(unittest.TestCase):
@@ -326,10 +421,11 @@ class AuthAcknowledgementScopeTests(unittest.TestCase):
                     maxChildReferences: CommandLine.arguments[1] == "limit-children-before" ? 2 :
                         (CommandLine.arguments[1] == "limit-children-after" ? 95 : 32768))''')
                 needles = ['    public func roleAndChildren()', '    func roleAndChildrenRead()',
+                           '    func optionalStringAttributesRead(',
                            '    func childrenRead()', '    public func findAll(\n        roles:',
                            '    public func findAll(role: String, limit: Int']
                 ui_methods = '\n'.join(block(ui, ui.index(needle)) for needle in needles)
-                scope = SCOPE.read_text() + '\n' + DIAGNOSTICS.read_text()
+                scope = SCOPE.read_text() + '\n' + DIAGNOSTICS.read_text() + '\n' + TEXT_READER.read_text()
             else:
                 auth_methods = frozen.split('// BEGIN AUTH\n')[1].split('// END AUTH')[0]
                 ui_methods = frozen.split('// BEGIN UI\n')[1].split('// END UI')[0]
@@ -347,7 +443,7 @@ class AuthAcknowledgementScopeTests(unittest.TestCase):
                 raise AssertionError(result.stderr)
             cls.binaries[candidate] = binary
         cls.results = {}
-        for scenario in STATIC + DYNAMIC + TRANSIENT:
+        for scenario in STATIC + DYNAMIC + TRANSIENT + TIMING_BOUNDARY:
             cls.results[scenario] = {key: json.loads(subprocess.check_output([str(cls.binaries[candidate]), scenario, mode], text=True))
                                      for key, candidate, mode in [('original', False, 'replay'), ('candidate', True, 'replay'), ('freshReference', False, 'final')]}
         report_path = os.environ.get('KMSG_AUTH_SCOPE_FIXTURE_REPORT')
@@ -393,7 +489,8 @@ class AuthAcknowledgementScopeTests(unittest.TestCase):
     def test_static_cost_admission_preserves_or_reduces_all_ax_calls(self):
         # Bound-invalid cases intentionally redo fresh resolution for safety
         # after a reuse, and are not a steady-state performance promise.
-        for name in set(STATIC) - {'limit-entries-after', 'limit-children-after'}:
+        for name in set(STATIC) - {'limit-entries-after', 'limit-children-after',
+                                   'first-ack', 'two-acks', 'tied-buttons', 'text-positive'}:
             with self.subTest(name=name):
                 original, candidate = self.results[name]['original'], self.results[name]['candidate']
                 self.assertLessEqual(candidate['totalAXCalls'], original['totalAXCalls'])
@@ -409,7 +506,9 @@ class AuthAcknowledgementScopeTests(unittest.TestCase):
         for name in ['limit-entries-before', 'limit-children-before', 'large-children']:
             with self.subTest(name=name):
                 a, b = self.results[name]['original'], self.results[name]['candidate']
-                self.assertEqual(a['totalAXCalls'], b['totalAXCalls'])
+                # Structural reads remain live; fresh text now uses its own
+                # batch calls, with no effect on the structural path/budget.
+                self.assertEqual(a['batchCalls'], b['batchCalls'] - int(b['notes']['auth.acktextbatches']))
                 self.assertEqual(b['notes']['auth.ackhits'], '0')
         for name in ['limit-entries-after', 'limit-children-after']:
             with self.subTest(name=name):
@@ -421,7 +520,8 @@ class AuthAcknowledgementScopeTests(unittest.TestCase):
     def test_numeric_details_survive_unchanged_500_character_forwarder(self):
         fields = {
             1: {'walk', 'guard', 'fallback', 'runs', 'roots', 'active', 'plans', 'credit', 'planNodes', 'guardMax', 'reason'},
-            2: {'hits', 'nodes', 'reused', 'live', 'validation', 'rootReads', 'rootValidation', 'unknown', 'fallbacks'},
+            2: {'hits', 'nodes', 'reused', 'live', 'validation', 'rootReads', 'rootValidation',
+                'unknown', 'fallbacks', 'textBatchCalls', 'scalarFallbackSlots', 'positiveFresh'},
         }
         for name, values in self.results.items():
             lines = values['candidate']['diagnostics']
@@ -433,7 +533,7 @@ class AuthAcknowledgementScopeTests(unittest.TestCase):
                 self.assertTrue(line.startswith('[kmsg] auth-detail total='))
                 tokens = dict(item.split('=') for item in line.split()[2:])
                 self.assertEqual(tokens.pop('status'), 'done')
-                self.assertEqual(tokens.pop('schema'), '1')
+                self.assertEqual(tokens.pop('schema'), '2')
                 part = int(tokens.pop('part'))
                 self.assertEqual(set(tokens), fields[part] | {'total'})
                 self.assertTrue(all(re.fullmatch(r'\d+(?:\.\d+)?', n) for n in tokens.values()))
@@ -455,6 +555,66 @@ class AuthAcknowledgementScopeTests(unittest.TestCase):
         case = self.results['positive-text-changes']
         self.assertNotEqual(case['original']['selected']['button'], 'none')
         self.assertEqual(case['candidate']['selected']['button'], 'none')
+
+    def test_inactive_structure_model_still_reduces_text_ipc(self):
+        a, b = (self.results['yui906-numeric-model'][k] for k in ['original', 'candidate'])
+        self.assertEqual(b['notes']['auth.ackactive'], '0')
+        self.assertEqual(b['notes']['auth.acklive'], '906')
+        self.assertEqual(b['notes']['auth.acknodes'], '390')
+        self.assertEqual(b['notes']['auth.ackunknown'], '29')
+        self.assertEqual(b['notes']['auth.acktextbatches'], '64')
+        self.assertEqual(b['notes']['auth.acktextscalars'], '0')
+        self.assertEqual((a['totalAXCalls'], b['totalAXCalls']), (1181, 989))
+
+    def test_uncertain_text_slots_retry_only_the_original_field(self):
+        for name in ['text-slot-error', 'text-slot-type', 'text-slot-null']:
+            b = self.results[name]['candidate']
+            self.assertEqual(b['notes']['auth.acktextscalars'], b['notes']['auth.acktextbatches'])
+            self.assertEqual(set(b['scalarTextReadNames']), {'value'})
+            self.assertEqual(b['selected'], self.results[name]['original']['selected'])
+
+    def test_repeated_failed_batches_cost_only_one_extra_attempt(self):
+        for name in ['text-batch-failure', 'text-wrong-length', 'text-all-slot-error', 'text-nil-array']:
+            b = self.results[name]['candidate']
+            self.assertEqual(b['notes']['auth.acktextbatches'], '1')
+            self.assertEqual(b['notes']['auth.acktextscalars'], '356')
+            self.assertEqual(b['scalarTextReadNames'], ['title', 'description', 'value', 'identifier'] * 89)
+            # Released scalar-text plus structure-sharing fixture cost 610.
+            self.assertEqual(b['totalAXCalls'], 611)
+            self.assertEqual(b['selected'], self.results[name]['original']['selected'])
+
+    def test_batch_circuit_lifetime_is_one_inspection(self):
+        b = self.results['text-circuit-reset']['candidate']
+        # First inspection: one failed batch then scalars. Next inspection:
+        # fresh reader tries batching again, and all 89 batches succeed.
+        self.assertEqual(len(b['textBatchRequestNames']), 90)
+        self.assertEqual(b['notes']['auth.acktextbatches'], '89')
+        self.assertEqual(b['notes']['auth.acktextscalars'], '0')
+
+    def test_text_field_order_and_absence_are_preserved(self):
+        for name in ['text-no-value', 'text-empty-strings', 'overlapping']:
+            b = self.results[name]['candidate']
+            self.assertEqual(b['notes']['auth.acktextscalars'], '0')
+            self.assertTrue(all(names == ['title', 'description', 'value', 'identifier']
+                                for names in b['textBatchRequestNames']))
+            self.assertEqual(b['selected'], self.results[name]['original']['selected'])
+
+    def test_positive_batch_is_reselected_with_fresh_scalar_roots(self):
+        for name in ['text-positive', 'text-positive-changes']:
+            b = self.results[name]['candidate']
+            self.assertEqual(b['notes']['auth.ackpositivefresh'], '1')
+            self.assertEqual(b['selected'], self.results[name]['freshReference']['selected'])
+        self.assertEqual(self.results['text-positive-changes']['candidate']['selected']['button'], 'none')
+
+    def test_negative_time_boundary_is_not_claimed_equivalent(self):
+        # A marker arrives after the element batch. The former scalar title
+        # then value calls can observe the later state; a batch is one earlier
+        # snapshot. Preserve this limit instead of asserting universal dynamic
+        # equivalence or hiding it behind a second scalar negative sweep.
+        a, b = (self.results['text-negative-boundary'][k] for k in ['original', 'candidate'])
+        self.assertNotEqual(a['selected']['button'], 'none')
+        self.assertEqual(b['selected']['button'], 'none')
+        self.assertEqual(b['notes']['auth.ackpositivefresh'], '0')
 
 
 class AuthAcknowledgementDiagnosticBoundaryTests(unittest.TestCase):
@@ -504,8 +664,8 @@ print(String(data: try JSONSerialization.data(withJSONObject: reports), encoding
         outer = '[kmsg] read total=99.99 status=ok auth=9.99 resolve=9.99 read=9.99 '
         outer += 'x' * (500 - len(outer))
         forwarded = [line[:500] for line in [
-            '[kmsg] auth-detail total=9.99 status=done schema=1 part=1',
-            '[kmsg] auth-detail total=9.99 status=done schema=1 part=2', outer,
+            '[kmsg] auth-detail total=9.99 status=done schema=2 part=1',
+            '[kmsg] auth-detail total=9.99 status=done schema=2 part=2', outer,
         ] if line.startswith('[kmsg] ') and ' total=' in line]
         self.assertEqual(forwarded[-1], outer)
         self.assertEqual(len(forwarded), 3)

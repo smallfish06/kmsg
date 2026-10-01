@@ -625,8 +625,10 @@ final class KakaoTalkAuthenticator {
     private func resolvePostLoginAcknowledgement() -> PostLoginAcknowledgement? {
         let started = DispatchTime.now()
         let scope = AXTraversalReadScope()
+        let textReader = AuthTextAttributeReader()
         var walkSeconds = 0.0, guardSeconds = 0.0, fallbackSeconds = 0.0
         var fallbackReason = 0
+        var positiveFresh = 0
         let roots = collectPostLoginAcknowledgementRoots()
         defer {
             // No read sharing reaches the caller's click, Escape or login.
@@ -648,6 +650,9 @@ final class KakaoTalkAuthenticator {
                 ("auth.ackguardmax", Double(counts.guardAXCost)),
                 ("auth.ackactive", Double(counts.activated)),
                 ("auth.ackfallbacks", fallbackReason == 0 ? 0 : 1),
+                ("auth.acktextbatches", Double(textReader.batchCalls)),
+                ("auth.acktextscalars", Double(textReader.scalarFallbackSlots)),
+                ("auth.ackpositivefresh", Double(positiveFresh)),
             ]
             for (key, value) in numbers { acknowledgementMetrics[key, default: 0] += value }
             let previous = Int(acknowledgementMetrics["auth.ackreason"] ?? 0)
@@ -656,6 +661,7 @@ final class KakaoTalkAuthenticator {
 
         func fallback(reason: Int) -> PostLoginAcknowledgement? {
             fallbackReason = reason
+            if reason == 1 { positiveFresh += 1 }
             scope.discard()
             let fallbackStarted = DispatchTime.now()
             defer { fallbackSeconds = seconds(since: fallbackStarted) }
@@ -663,15 +669,13 @@ final class KakaoTalkAuthenticator {
         }
 
         let walkStarted = DispatchTime.now()
-        let candidate = resolvePostLoginAcknowledgement(in: roots.roots, readScope: scope)
+        let candidate = resolvePostLoginAcknowledgement(in: roots.roots, readScope: scope, textReader: textReader)
         walkSeconds = seconds(since: walkStarted)
-        // With no reused values this was exactly the original AX read path.
-        // A positive first-root result also needs no repeat selection.
-        if scope.counts.hits == 0 { return candidate }
-
-        // A positive shared candidate needs no expensive structural guard.
-        // Discard sharing and select with fresh roots/text before any click.
+        // A batch observes one element at one time rather than four scalar
+        // times. Any positive candidate is selected again using fresh roots
+        // and the original scalar path before its caller may click.
         if candidate != nil { return fallback(reason: 1) }
+        if scope.counts.hits == 0 { return nil }
 
         let guardStarted = DispatchTime.now()
         var reason = 0
@@ -691,7 +695,8 @@ final class KakaoTalkAuthenticator {
     }
 
     private func resolvePostLoginAcknowledgement(
-        in roots: [UIElement], readScope: AXTraversalReadScope? = nil
+        in roots: [UIElement], readScope: AXTraversalReadScope? = nil,
+        textReader: AuthTextAttributeReader? = nil
     ) -> PostLoginAcknowledgement? {
         let roles: Set<String> = [kAXButtonRole, kAXStaticTextRole, kAXGroupRole]
         let roleLimits = [kAXButtonRole: 8, kAXStaticTextRole: 16, kAXGroupRole: 6]
@@ -702,7 +707,7 @@ final class KakaoTalkAuthenticator {
         for (index, root) in roots.enumerated() {
             readScope?.considerReuse(in: roots[index...], roles: roles, roleLimits: roleLimits,
                                      maxNodes: 260, guardAXCost: guardAXCost)
-            if let acknowledgement = resolvePostLoginAcknowledgement(in: root, readScope: readScope) {
+            if let acknowledgement = resolvePostLoginAcknowledgement(in: root, readScope: readScope, textReader: textReader) {
                 return acknowledgement
             }
         }
@@ -735,9 +740,10 @@ final class KakaoTalkAuthenticator {
     }
 
     private func resolvePostLoginAcknowledgement(
-        in root: UIElement, readScope: AXTraversalReadScope? = nil
+        in root: UIElement, readScope: AXTraversalReadScope? = nil,
+        textReader: AuthTextAttributeReader? = nil
     ) -> PostLoginAcknowledgement? {
-        let message = collectPostLoginAcknowledgementText(from: root, readScope: readScope)
+        let message = collectPostLoginAcknowledgementText(from: root, readScope: readScope, textReader: textReader)
         guard containsPostLoginAcknowledgementMarkers(message) else {
             return nil
         }
@@ -753,7 +759,8 @@ final class KakaoTalkAuthenticator {
     }
 
     private func collectPostLoginAcknowledgementText(
-        from root: UIElement, readScope: AXTraversalReadScope? = nil
+        from root: UIElement, readScope: AXTraversalReadScope? = nil,
+        textReader: AuthTextAttributeReader? = nil
     ) -> String {
         let roles: Set<String> = [kAXButtonRole, kAXStaticTextRole, kAXGroupRole]
         let found = root.findAll(roles: roles, roleLimits: [
@@ -763,13 +770,11 @@ final class KakaoTalkAuthenticator {
         ], maxNodes: 260, readScope: readScope)
 
         let tokens = (found[kAXStaticTextRole] ?? []) + (found[kAXButtonRole] ?? []) + (found[kAXGroupRole] ?? [])
-        return normalizedText(tokens.map {
-            [
-                $0.title,
-                $0.axDescription,
-                $0.stringValue,
-                $0.identifier,
-            ].compactMap { $0 }.joined(separator: " ")
+        return normalizedText(tokens.map { element in
+            let attributes = textReader?.read(element) ?? [
+                element.title, element.axDescription, element.stringValue, element.identifier,
+            ]
+            return attributes.compactMap { $0 }.joined(separator: " ")
         }.joined(separator: " "))
     }
 

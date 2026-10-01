@@ -16,11 +16,14 @@ enum AuthAcknowledgementDiagnostics {
              ("reused", "auth.ackreused", false), ("live", "auth.acklive", false),
              ("validation", "auth.ackvbatch", false), ("rootReads", "auth.ackrread", false),
              ("rootValidation", "auth.ackvrread", false), ("unknown", "auth.ackunknown", false),
-             ("fallbacks", "auth.ackfallbacks", false)],
+             ("fallbacks", "auth.ackfallbacks", false),
+             ("textBatchCalls", "auth.acktextbatches", false),
+             ("scalarFallbackSlots", "auth.acktextscalars", false),
+             ("positiveFresh", "auth.ackpositivefresh", false)],
         ]
         var lines: [String] = []
         for (index, section) in sections.enumerated() {
-            var line = String(format: "[kmsg] auth-detail total=%.2f status=done schema=1 part=%d", total, index + 1)
+            var line = String(format: "[kmsg] auth-detail total=%.2f status=done schema=2 part=%d", total, index + 1)
             for (label, key, isTime) in section {
                 guard let value = metrics[key], value.isFinite, value >= 0,
                       value <= (isTime ? 86400 : 1_000_000_000),
