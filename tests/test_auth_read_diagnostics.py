@@ -108,13 +108,15 @@ for name in cases { for enabled in [false, true] {
     let previous = AuthReadDiagnostics.install(diagnostics)
     _ = diagnostics?.enterPhase("dismiss")
     let element = UIElement(Node())
-    let result = element.roleAndChildrenRead()
+    var observedAbsence = false
+    // READ_STRUCTURE
     let strings = element.optionalStringAttributesRead([kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute, kAXIdentifierAttribute])
     let scalar: String? = element.attributeOptional(kAXTitleAttribute)
     rows.append(["case": name, "enabled": enabled, "rolePresent": result.role != nil,
                  "children": result.children.count, "complete": result.complete,
                  "stringsPresent": strings.values.map { $0 != nil }, "fallback": strings.scalarFallbackIndices,
                  "scalarPresent": scalar != nil, "ipc": ipc, "clockCalls": clockCalls,
+                 "observedAbsence": observedAbsence,
                  "lines": diagnostics?.lines(total: 1) ?? []])
     AuthReadDiagnostics.install(previous)
 } }
@@ -255,6 +257,11 @@ class AuthReadDiagnosticsTests(unittest.TestCase):
         bestNodes: c.bestNodes, bestGuard: c.bestGuard, rootMissing: c.rootMissing,
         unknownBreaks: c.unknownBreaks, rootIncomplete: c.rootIncomplete)''' if candidate else ''
             source = READ.read_text() + '\n' + PHASE.read_text() + '\n' + scope + '\n' + STUB
+            if candidate:
+                source += '\n' + (ROOT / 'Sources/kmsg/Accessibility/AuthShadowPlanner.swift').read_text()
+            source = source.replace('// READ_STRUCTURE',
+                'let result = element.roleAndChildrenRead(observeAbsence: enabled ? { observedAbsence = $0 } : nil)'
+                if candidate else 'let result = element.roleAndChildrenRead()')
             source = source.replace('// UI_METHODS', decoder).replace('// RECORD_SCOPE', record)
             source = source.replace('// DIAGNOSTIC_CHECKS', CHECKS if candidate else 'let checks: [String: Any] = [:]')
             path = Path(cls.tmp.name) / ('candidate.swift' if candidate else 'reference.swift')
@@ -294,6 +301,8 @@ class AuthReadDiagnosticsTests(unittest.TestCase):
             self.assertEqual(shape[expected], '1', name)
             self.assertEqual(shape['childrenMissing'], '1', name)
             self.assertFalse(rows[name]['complete'], name)
+        for name, row in rows.items():
+            self.assertEqual(row['observedAbsence'], name in ['unsupported', 'no-value'], name)
         row = rows['bad-role-valid-child']
         self.assertEqual(row['children'], 1)
         self.assertFalse(row['complete'])

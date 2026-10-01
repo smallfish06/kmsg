@@ -211,7 +211,9 @@ public final class UIElement: @unchecked Sendable {
         batchAttributes(names, diagnoseStructure: false)
     }
 
-    private func batchAttributes(_ names: [String], diagnoseStructure: Bool) -> [Any?] {
+    private func batchAttributes(
+        _ names: [String], diagnoseStructure: Bool, observeAbsence: ((Bool) -> Void)? = nil
+    ) -> [Any?] {
         var values: CFArray?
         let diagnostics = AuthReadDiagnostics.current
         let readStarted = diagnostics?.beginRead(.batch)
@@ -227,6 +229,17 @@ public final class UIElement: @unchecked Sendable {
             diagnostics.recordStructure(error: error, raw: raw,
                 roleIsString: raw?.count == 2 && raw?[0] is String,
                 childrenAreElements: raw?.count == 2 && raw?[1] is [AXUIElement])
+        }
+        if let observeAbsence {
+            var absence = false
+            if error == .success, let raw = values as? [AnyObject], raw.count == 2,
+               raw[0] is String, CFGetTypeID(raw[1]) == AXValueGetTypeID() {
+                let value = unsafeDowncast(raw[1], to: AXValue.self)
+                var slotError = AXError.success
+                if AXValueGetType(value) == .axError, AXValueGetValue(value, .axError, &slotError),
+                   slotError == .attributeUnsupported || slotError == .noValue { absence = true }
+            }
+            observeAbsence(absence)
         }
         guard error == .success, let raw = values as? [AnyObject], raw.count == names.count else {
             return [Any?](repeating: nil, count: names.count)
@@ -289,8 +302,9 @@ public final class UIElement: @unchecked Sendable {
 
     /// A nil/error children slot is not evidence of a successful empty array.
     /// Keep the legacy returned values while exposing whether sharing is safe.
-    func roleAndChildrenRead() -> (role: String?, children: [UIElement], complete: Bool) {
-        let values = batchAttributes([kAXRoleAttribute, kAXChildrenAttribute], diagnoseStructure: true)
+    func roleAndChildrenRead(observeAbsence: ((Bool) -> Void)? = nil) -> (role: String?, children: [UIElement], complete: Bool) {
+        let values = batchAttributes([kAXRoleAttribute, kAXChildrenAttribute], diagnoseStructure: true,
+                                     observeAbsence: observeAbsence)
         let role = values[0] as? String
         let rawChildren = values[1] as? [AXUIElement]
         let children = rawChildren?.map { UIElement($0) } ?? []

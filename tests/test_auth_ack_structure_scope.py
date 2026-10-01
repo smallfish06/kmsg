@@ -137,8 +137,9 @@ public final class UIElement {
             return nil
         }
     }
-    private func batchAttributes(_ names: [String], diagnoseStructure: Bool) -> [Any?] {
-        batchAttributes(names)
+    private func batchAttributes(_ names: [String], diagnoseStructure: Bool, observeAbsence: ((Bool) -> Void)? = nil) -> [Any?] {
+        observeAbsence?(false)
+        return batchAttributes(names)
     }
 // UI_METHODS
 }
@@ -361,6 +362,7 @@ if scenario == "positive-text-changes" && !finalReference {
         if node.childReads == 1 { world.acknowledgement?.value = "already logged in"; world.ok?.title = "OK" }
     }
 }
+// SET_READ_DIAGNOSTICS
 counts = Counts(); walks = []; notes = [:]; diagnosticLines = []
 let auth = FixtureAuthenticator()
 var answer = auth.inspect()
@@ -423,13 +425,14 @@ class AuthAcknowledgementScopeTests(unittest.TestCase):
                         (CommandLine.arguments[1] == "limit-entries-after" ? 96 : 4096),
                     maxChildReferences: CommandLine.arguments[1] == "limit-children-before" ? 2 :
                         (CommandLine.arguments[1] == "limit-children-after" ? 95 : 32768))''')
-                needles = ['    public func roleAndChildren()', '    func roleAndChildrenRead()',
+                needles = ['    public func roleAndChildren()', '    func roleAndChildrenRead(',
                            '    func optionalStringAttributesRead(',
                            '    func childrenRead()', '    public func findAll(\n        roles:',
                            '    public func findAll(role: String, limit: Int']
                 ui_methods = '\n'.join(block(ui, ui.index(needle)) for needle in needles)
                 scope = SCOPE.read_text() + '\n' + DIAGNOSTICS.read_text() + '\n' + TEXT_READER.read_text()
                 scope += '\n' + (ROOT / 'Sources/kmsg/Auth/AuthReadDiagnostics.swift').read_text()
+                scope += '\n' + (ROOT / 'Sources/kmsg/Accessibility/AuthShadowPlanner.swift').read_text()
             else:
                 auth_methods = frozen.split('// BEGIN AUTH\n')[1].split('// END AUTH')[0]
                 ui_methods = frozen.split('// BEGIN UI\n')[1].split('// END UI')[0]
@@ -440,7 +443,14 @@ class AuthAcknowledgementScopeTests(unittest.TestCase):
                 notes = acknowledgementMetrics.mapValues { String(format: "%.0f", $0) }
                 emitAcknowledgementMetrics()''' if candidate else '')
             path = Path(cls.tmp.name) / ('candidate.swift' if candidate else 'reference.swift')
-            path.write_text(source + '\n' + scope + '\n' + CASES)
+            cases = CASES.replace('// SET_READ_DIAGNOSTICS', '''
+let enabledReadDiagnostics = CommandLine.arguments.count > 3 && CommandLine.arguments[3] == "on"
+AuthReadDiagnostics.install(enabledReadDiagnostics ? AuthReadDiagnostics() : nil)
+''' if candidate else '')
+            if candidate:
+                cases = cases.replace('"diagnostics": diagnosticLines,',
+                    '"diagnostics": diagnosticLines, "readDetails": AuthReadDiagnostics.current?.lines(total: 0) ?? [],')
+            path.write_text(source + '\n' + scope + '\n' + cases)
             binary = path.with_suffix('')
             result = subprocess.run([*swiftc_command(), str(path), '-o', str(binary)], capture_output=True, text=True)
             if result.returncode:
@@ -467,6 +477,21 @@ class AuthAcknowledgementScopeTests(unittest.TestCase):
                 original, candidate = self.results[name]['original'], self.results[name]['candidate']
                 self.assertEqual(candidate['selected'], original['selected'])
                 self.assertEqual(candidate['walks'][:len(original['walks'])], original['walks'])
+
+    def test_shadow_diagnostics_preserve_all_resolver_results_reads_and_walks(self):
+        for name, values in self.results.items():
+            on = json.loads(subprocess.check_output([str(self.binaries[True]), name, 'replay', 'on'], text=True))
+            off = values['candidate']
+            for field in ['selected', 'walks', 'batchCalls', 'singleCalls', 'rootCollections',
+                          'scalarTextReadNames', 'textBatchRequestNames']:
+                self.assertEqual(on[field], off[field], (name, field))
+            self.assertEqual(off['readDetails'], [])
+            details = {line.split()[1] + (':' + next((part.split('=')[1] for part in line.split() if part.startswith('variant=')), '')):
+                       dict(part.split('=', 1) for part in line.split()[2:]) for line in on['readDetails']}
+            base, real = details['auth-shadow:base'], details['auth-plan:']
+            for a, b in [('bestNet','bestNet'),('hits','bestHits'),('nodes','bestNodes'),
+                         ('guard','bestGuard'),('rootMissing','rootMissing'),('unknownBreaks','unknownBreaks')]:
+                self.assertEqual(base[a], real[b], (name, 'base parity', a))
 
     def test_dynamic_fallback_matches_current_fresh_roots(self):
         for name in DYNAMIC:

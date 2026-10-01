@@ -645,6 +645,7 @@ final class KakaoTalkAuthenticator {
             // No read sharing reaches the caller's click, Escape or login.
             scope.discard()
             let counts = scope.counts
+            scope.recordShadowDiagnostics()
             AuthReadDiagnostics.current?.recordScope(
                 invalid: counts.invalidMask, firstInvalidVisit: counts.firstInvalidVisit,
                 skipMask: counts.skipMask, rejects: counts.rejects,

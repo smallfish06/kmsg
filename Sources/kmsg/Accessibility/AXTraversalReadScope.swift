@@ -66,11 +66,13 @@ public final class AXTraversalReadScope {
         didSet { if let invalid { noteInvalid(invalid) } }
     }
     private var reuseKeys: Set<Key>?
+    private let shadow: AuthShadowPlanner?
     private(set) var counts = Counts()
 
     init(maxEntries: Int = 4096, maxChildReferences: Int = 32768) {
         self.maxEntries = maxEntries
         self.maxChildReferences = maxChildReferences
+        self.shadow = AuthReadDiagnostics.current == nil ? nil : AuthShadowPlanner()
     }
 
     /// Learn using the original live reads first. Reuse starts only when the
@@ -84,6 +86,8 @@ public final class AXTraversalReadScope {
         guard reuseKeys == nil else { counts.skipMask |= 1; return }
         guard invalid == nil else { counts.skipMask |= 2; return }
         guard !entries.isEmpty else { counts.skipMask |= 4; return }
+        shadow?.beforeRoot(roots: remainingRoots, roles: roles, limits: roleLimits,
+                           maxNodes: maxNodes, guardCost: guardAXCost, snapshot: shadowSnapshot())
         let diagnostics = AuthReadDiagnostics.current
         let planStarted = diagnostics?.beginPlan()
         defer { if let planStarted { diagnostics?.endPlan(since: planStarted) } }
@@ -132,6 +136,7 @@ public final class AXTraversalReadScope {
     }
 
     func children(atRoot root: UIElement) -> [UIElement] {
+        defer { shadow?.afterRoot(root, snapshot: shadowSnapshot(), valid: invalid == nil) }
         counts.rootReads += 1
         let read = root.childrenRead()
         let key = Key(element: root)
@@ -171,7 +176,9 @@ public final class AXTraversalReadScope {
             return (saved.role, saved.children)
         }
         counts.liveBatches += 1
-        let read = element.roleAndChildrenRead()
+        var typedAbsence = false
+        let read = element.roleAndChildrenRead(observeAbsence: shadow == nil ? nil : { typedAbsence = $0 })
+        shadow?.observe(element, role: read.role, typedAbsence: typedAbsence)
         if read.complete, let role = read.role, invalid == nil {
             if let saved = entries[key] {
                 // Learning must never replace the first observation with a
@@ -226,6 +233,19 @@ public final class AXTraversalReadScope {
         rootOrder.removeAll(keepingCapacity: false)
         childReferences = 0
         reuseKeys = nil
+        shadow?.discard()
+    }
+
+    private func shadowSnapshot() -> AuthShadowPlanner.Snapshot {
+        AuthShadowPlanner.Snapshot(nodes: entryOrder.compactMap { key in
+            entries[key].map { ($0.element, $0.role, $0.children) }
+        }, roots: rootOrder.compactMap { key in
+            roots[key].map { ($0.element, $0.children) }
+        })
+    }
+
+    func recordShadowDiagnostics() {
+        if let diagnostics = AuthReadDiagnostics.current { shadow?.record(into: diagnostics) }
     }
 
     private func reserve(children: Int) -> Bool {

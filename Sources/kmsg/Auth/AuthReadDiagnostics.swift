@@ -6,6 +6,7 @@ import Foundation
 final class AuthReadDiagnostics: NSObject {
     enum Bucket: String, CaseIterable { case ack, marker, input, other }
     enum ReadKind { case scalar, batch }
+    enum ShadowVariant: String, CaseIterable { case base, a, b, ab }
     struct ReadTicket { let started: UInt64; let bucket: Bucket; let kind: ReadKind }
     private struct IO {
         var scalar = 0, batch = 0, errors = 0
@@ -29,6 +30,7 @@ final class AuthReadDiagnostics: NSObject {
     private var shape: [String: Int] = [:]
     private var plan: [String: Int] = [:]
     private var planSeconds = 0.0
+    private var shadow: [ShadowVariant: [String: Int]] = [:]
 
     init(now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }) {
         self.now = now
@@ -80,6 +82,22 @@ final class AuthReadDiagnostics: NSObject {
             plan["bestNet"] = bestNet; plan["bestHits"] = bestHits
             plan["bestNodes"] = bestNodes; plan["bestGuard"] = bestGuard
         }
+    }
+
+    func recordShadow(
+        _ variant: ShadowVariant, plans: Int, bestNet: Int, hits: Int, nodes: Int,
+        guardCost: Int, rootMissing: Int, unknownBreaks: Int
+    ) {
+        var value = shadow[variant, default: [:]]
+        value["plans", default: 0] += plans
+        value["rootMissing", default: 0] += rootMissing
+        value["unknownBreaks", default: 0] += unknownBreaks
+        if plans > 0, value["bestNet"] == nil || bestNet > value["bestNet", default: 0] {
+            value["bestNet"] = bestNet; value["hits"] = hits
+            value["nodes"] = nodes; value["guard"] = guardCost
+            value["keys"] = nodes
+        }
+        shadow[variant] = value
     }
 
     /// Called only with the raw result already returned by the original read.
@@ -137,6 +155,18 @@ final class AuthReadDiagnostics: NSObject {
         func header(_ kind: String) -> String {
             String(format: "[kmsg] auth-%@ total=%.3f status=done schema=1", kind, total)
         }
+        var shadowLines: [String] = []
+        for variant in ShadowVariant.allCases {
+            guard let value = shadow[variant] else { continue }
+            clipped = false
+            var line = header("shadow") + " variant=\(variant.rawValue)"
+            for key in ["plans", "bestNet", "hits", "nodes", "guard", "keys", "rootMissing", "unknownBreaks"] {
+                line += " \(key)=\(number(Double(value[key, default: 0])))"
+            }
+            line += " clip=\(clipped ? 1 : 0)"
+            shadowLines.append(line)
+        }
+        clipped = false
         var planLine = header("plan")
         for key in ["invalid", "firstInvalidVisit", "skipMask", "rejects", "bestNet", "bestHits",
                     "bestNodes", "bestGuard", "rootMissing", "unknownBreaks", "rootIncomplete"] {
@@ -162,7 +192,7 @@ final class AuthReadDiagnostics: NSObject {
             ioLine += " \(bucket.rawValue)=" + tuple.joined(separator: ",")
         }
         ioLine += " clip=\(clipped ? 1 : 0)"
-        let lines = [planLine, shapeLine, ioLine]
+        let lines = shadowLines + [planLine, shapeLine, ioLine]
         return lines.allSatisfy { $0.utf8.count < 500 } ? lines : []
     }
 }
