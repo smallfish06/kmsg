@@ -1,5 +1,58 @@
 import Foundation
 
+/// One read's optional, numeric-only cost notes. No AX values enter this type.
+/// Timers are nested costs; their sum is not the read's elapsed time.
+final class TranscriptReadCost {
+    enum Slice: Int, CaseIterable {
+        case input, cache, pane, shallow, containers, spatial, bonus, store
+        case collectShallow, collectContainers, collectRows, collectCells, geometry, sort
+    }
+    enum Count: Int, CaseIterable {
+        case cacheCalls, cacheHits, shallowVisits, containerCalls, containerCandidates, bonusCalls, inputVisits
+        case collectCalls, collectShallowVisits, collectFallbackCalls, rawRows, uniqueRows, filteredRows, recentRows
+    }
+    private var durations = Array(repeating: UInt64(0), count: Slice.allCases.count)
+    private var counts = Array(repeating: 0, count: Count.allCases.count)
+    private let write: (String, String) -> Void
+    private var emitted = false
+
+    init(write: @escaping (String, String) -> Void) { self.write = write }
+    func mark() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
+    func end(_ slice: Slice, _ started: UInt64?) {
+        guard let started else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        durations[slice.rawValue] = min(100_000_000_000,
+            durations[slice.rawValue] + min(100_000_000_000, now >= started ? now - started : 0))
+    }
+    func add(_ count: Count, _ value: Int = 1) {
+        counts[count.rawValue] = min(100_000, counts[count.rawValue] + min(100_000, max(0, value)))
+    }
+
+    func emit() {
+        guard !emitted else { return }
+        emitted = true
+        // Version 1 tuples have fixed positions. Cap counters and milliseconds
+        // to preserve the bridge's 500-character detail-summary budget. The
+        // explicit saturation bit prevents treating the cap as an exact value.
+        var clipped = false
+        func bounded(_ value: UInt64) -> String {
+            if value > 99_999 { clipped = true }
+            return String(min(value, 99_999))
+        }
+        func tuple(_ slices: [Slice], _ fields: [Count]) -> String {
+            (["1"] + slices.map { bounded(durations[$0.rawValue] / 1_000_000) }
+                + fields.map { bounded(UInt64(counts[$0.rawValue])) }).joined(separator: "/")
+        }
+        let context = tuple([.input, .cache, .pane, .shallow, .containers, .spatial, .bonus, .store],
+                            [.cacheCalls, .cacheHits, .shallowVisits, .containerCalls, .containerCandidates, .bonusCalls, .inputVisits])
+        let collection = tuple([.collectShallow, .collectContainers, .collectRows, .collectCells, .geometry, .sort],
+                               [.collectCalls, .collectShallowVisits, .collectFallbackCalls, .rawRows, .uniqueRows, .filteredRows, .recentRows])
+        write("costctx", context)
+        write("costcol", collection)
+        if clipped { write("costclip", "1") }
+    }
+}
+
 struct MessageTranscriptContext {
     let inputElement: UIElement
     let chatPaneRoot: UIElement?
@@ -11,17 +64,20 @@ struct MessageContextResolver {
     private let runner: AXActionRunner
     private let useCache: Bool
     private let interactionMode: ChatWindowInteractionMode
+    private let readCost: TranscriptReadCost?
 
     init(
         kakao: KakaoTalkApp,
         runner: AXActionRunner,
         useCache: Bool = true,
-        interactionMode: ChatWindowInteractionMode = .allowUIAutomation
+        interactionMode: ChatWindowInteractionMode = .allowUIAutomation,
+        readCost: TranscriptReadCost? = nil
     ) {
         self.kakao = kakao
         self.runner = runner
         self.useCache = useCache
         self.interactionMode = interactionMode
+        self.readCost = readCost
     }
 
     func resolve(in chatWindow: UIElement) -> MessageTranscriptContext? {
@@ -51,6 +107,8 @@ struct MessageContextResolver {
     }
 
     private func resolveMessageInputField(chatWindow: UIElement) -> UIElement? {
+        let started = readCost?.mark()
+        defer { readCost?.end(.input, started) }
         if let cachedInput = resolveCachedElement(
             slot: .messageInput,
             root: chatWindow,
@@ -202,6 +260,8 @@ struct MessageContextResolver {
     /// observed KakaoTalk layout, so this finds it in tens of AX calls where
     /// the node-budget BFS needs hundreds.
     private func shallowTranscriptContainers(from root: UIElement) -> [UIElement] {
+        let started = readCost?.mark()
+        defer { readCost?.end(.shallow, started) }
         let containerRoles: Set<String> = [
             kAXScrollAreaRole, kAXTableRole, kAXOutlineRole, kAXListRole, kAXGroupRole,
         ]
@@ -211,6 +271,7 @@ struct MessageContextResolver {
             var nextFrontier: [UIElement] = []
             for element in frontier {
                 for child in element.children {
+                    readCost?.add(.shallowVisits)
                     guard let role = child.role, containerRoles.contains(role) else { continue }
                     found.append(child)
                     nextFrontier.append(child)
@@ -225,6 +286,9 @@ struct MessageContextResolver {
     }
 
     private func collectTranscriptContainers(from root: UIElement) -> [UIElement] {
+        let started = readCost?.mark()
+        defer { readCost?.end(.containers, started) }
+        readCost?.add(.containerCalls)
         let roles: Set<String> = [
             kAXScrollAreaRole, kAXTableRole, kAXOutlineRole, kAXListRole, kAXGroupRole,
         ]
@@ -241,11 +305,14 @@ struct MessageContextResolver {
         for role in [kAXScrollAreaRole, kAXTableRole, kAXOutlineRole, kAXListRole, kAXGroupRole] {
             containers.append(contentsOf: found[role] ?? [])
         }
+        readCost?.add(.containerCandidates, containers.count)
         return containers
     }
 
     /// Phase 1: spatial/role-based scoring (no BFS calls)
     private func scoreTranscriptContainerSpatial(_ candidate: UIElement, chatWindow: UIElement, inputElement: UIElement) -> Double {
+        let started = readCost?.mark()
+        defer { readCost?.end(.spatial, started) }
         guard
             let windowFrame = chatWindow.frame,
             let inputFrame = inputElement.frame,
@@ -306,6 +373,9 @@ struct MessageContextResolver {
 
     /// Phase 2: child bonus via single multi-role BFS
     private func scoreTranscriptContainerChildBonus(_ candidate: UIElement) -> Double {
+        let started = readCost?.mark()
+        defer { readCost?.end(.bonus, started) }
+        readCost?.add(.bonusCalls)
         let roles: Set<String> = [kAXRowRole, kAXStaticTextRole]
         let found = candidate.findAll(
             roles: roles,
@@ -327,6 +397,8 @@ struct MessageContextResolver {
     }
 
     private func preferredChatPaneRoot(for inputElement: UIElement, in chatWindow: UIElement) -> UIElement? {
+        let started = readCost?.mark()
+        defer { readCost?.end(.pane, started) }
         guard let windowFrame = chatWindow.frame else { return nil }
         let ancestors = ancestorChain(of: inputElement, maxHops: 8)
 
@@ -361,11 +433,13 @@ struct MessageContextResolver {
     private func collectMessageInputCandidates(from root: UIElement, limit: Int = 80) -> [UIElement] {
         let nodeBudget = max(200, limit * 4)
         let roleCandidates = root.findAll(where: { element in
+            readCost?.add(.inputVisits)
             guard element.isEffectivelyEnabled else { return false }
             return element.role == kAXTextAreaRole || element.role == kAXTextFieldRole
         }, limit: limit, maxNodes: nodeBudget)
 
         let editableCandidates = root.findAll(where: { element in
+            readCost?.add(.inputVisits)
             guard element.isEffectivelyEnabled else { return false }
             let editable: Bool = element.attributeOptional(kAXEditableAttribute) ?? false
             guard editable else { return false }
@@ -384,6 +458,7 @@ struct MessageContextResolver {
         while let element = cursor, hops < 4 {
             candidates.append(element)
             let textDescendants = element.findAll(where: { node in
+                readCost?.add(.inputVisits)
                 guard node.isEffectivelyEnabled else { return false }
                 return node.role == kAXTextAreaRole || node.role == kAXTextFieldRole
             }, limit: 8, maxNodes: 48)
@@ -496,7 +571,10 @@ struct MessageContextResolver {
         validate: (UIElement) -> Bool
     ) -> UIElement? {
         guard useCache else { return nil }
-        return AXPathCacheStore.shared.resolve(
+        let started = readCost?.mark()
+        defer { readCost?.end(.cache, started) }
+        readCost?.add(.cacheCalls)
+        let resolved = AXPathCacheStore.shared.resolve(
             slot: slot,
             root: root,
             validate: validate,
@@ -504,10 +582,14 @@ struct MessageContextResolver {
                 runner.log(message)
             }
         )
+        if resolved != nil { readCost?.add(.cacheHits) }
+        return resolved
     }
 
     private func rememberCachedElement(slot: AXPathSlot, root: UIElement, element: UIElement) {
         guard useCache else { return }
+        let started = readCost?.mark()
+        defer { readCost?.end(.store, started) }
         AXPathCacheStore.shared.remember(
             slot: slot,
             root: root,

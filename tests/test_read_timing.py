@@ -30,11 +30,13 @@ enum ProbeError: Error { case expected }
 struct Resolution { let effectiveChatTitle: String? = nil; let chatTitle: String? = nil }
 struct Reader {
     func readSnapshot(from: Int, fallbackChatTitle: String, limit: Int,
-                      chatTitleOverride: String?, readPhase: ((String) -> Void)?) throws -> String {
+                      chatTitleOverride: String?, readPhase: ((String) -> Void)?,
+                      readNote: ((String, String) -> Void)?) throws -> String {
         for step in ["context", "collect", "parse"] {
             readPhase?(step)
             Thread.sleep(forTimeInterval: 0.02)
         }
+        readNote?("costctx", "1/0/0/0/0/0/0/0/0/0/0/0/0/0/0/0")
         if CommandLine.arguments.contains("fail") { throw ProbeError.expected }
         return "unchanged payload"
     }

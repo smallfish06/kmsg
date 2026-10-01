@@ -222,14 +222,18 @@ struct KakaoTalkTranscriptReader {
         limit: Int,
         includeSystemMessages: Bool = false,
         chatTitleOverride: String? = nil,
-        readPhase: ((String) -> Void)? = nil
+        readPhase: ((String) -> Void)? = nil,
+        readNote: ((String, String) -> Void)? = nil
     ) throws -> TranscriptSnapshot {
         let referenceDate = Date()
+        let readCost = readNote.map { TranscriptReadCost(write: $0) }
+        defer { readCost?.emit() }
         readPhase?("context")
         let messageContextResolver = MessageContextResolver(
             kakao: kakao,
             runner: runner,
-            interactionMode: interactionMode
+            interactionMode: interactionMode,
+            readCost: readCost
         )
         guard let messageContext = messageContextResolver.resolve(in: window) else {
             throw TranscriptReadError.transcriptContextUnavailable
@@ -243,7 +247,8 @@ struct KakaoTalkTranscriptReader {
             includeSystemMessages: includeSystemMessages,
             referenceDate: referenceDate,
             chatTitleOverride: chatTitleOverride,
-            readPhase: readPhase
+            readPhase: readPhase,
+            readCost: readCost
         )
     }
 
@@ -255,7 +260,8 @@ struct KakaoTalkTranscriptReader {
         includeSystemMessages: Bool = false,
         referenceDate: Date = Date(),
         chatTitleOverride: String? = nil,
-        readPhase: ((String) -> Void)? = nil
+        readPhase: ((String) -> Void)? = nil,
+        readCost: TranscriptReadCost? = nil
     ) throws -> TranscriptSnapshot {
         readPhase?("collect")
         let frameCache = FrameCache()
@@ -263,7 +269,8 @@ struct KakaoTalkTranscriptReader {
             from: context.transcriptRoot,
             inputElement: context.inputElement,
             messageLimit: limit,
-            frameCache: frameCache
+            frameCache: frameCache,
+            readCost: readCost
         )
         let messageRows = collected.rows
         guard !messageRows.isEmpty else {
@@ -282,7 +289,8 @@ struct KakaoTalkTranscriptReader {
                     from: context.transcriptRoot,
                     inputElement: context.inputElement,
                     messageLimit: limit,
-                    frameCache: cache
+                    frameCache: cache,
+                    readCost: readCost
                 ).rows
             },
             readPhase: readPhase
@@ -307,8 +315,10 @@ struct KakaoTalkTranscriptReader {
         from transcriptRoot: UIElement,
         inputElement: UIElement,
         messageLimit: Int,
-        frameCache: FrameCache
+        frameCache: FrameCache,
+        readCost: TranscriptReadCost? = nil
     ) -> (rows: [UIElement], cut: String?) {
+        readCost?.add(.collectCalls)
         let targetRowCount = max(messageLimit * 4, 50)
         var rows: [UIElement] = []
 
@@ -323,10 +333,12 @@ struct KakaoTalkTranscriptReader {
         ]
         var frontier = [transcriptRoot]
         var depth = 0
+        let shallowStarted = readCost?.mark()
         while depth < 4, !frontier.isEmpty, rows.count < targetRowCount {
             var nextFrontier: [UIElement] = []
             for container in frontier {
                 for child in container.children {
+                    readCost?.add(.collectShallowVisits)
                     guard let role = child.role else { continue }
                     if role == kAXRowRole {
                         rows.append(child)
@@ -338,11 +350,15 @@ struct KakaoTalkTranscriptReader {
             frontier = nextFrontier
             depth += 1
         }
+        readCost?.end(.collectShallow, shallowStarted)
         if !rows.isEmpty {
             runner.log("read: transcript rows via shallow container walk depth=\(depth)")
         }
 
         if rows.isEmpty {
+            let started = readCost?.mark()
+            defer { readCost?.end(.collectContainers, started) }
+            readCost?.add(.collectFallbackCalls)
             let found = transcriptRoot.findAll(
                 roles: [kAXTableRole, kAXOutlineRole, kAXListRole, kAXScrollAreaRole],
                 roleLimits: [
@@ -361,6 +377,9 @@ struct KakaoTalkTranscriptReader {
         }
 
         if rows.isEmpty {
+            let started = readCost?.mark()
+            defer { readCost?.end(.collectRows, started) }
+            readCost?.add(.collectFallbackCalls)
             let bfsRows = transcriptRoot.findAll(
                 role: kAXRowRole,
                 limit: max(targetRowCount * 3, 240),
@@ -370,10 +389,14 @@ struct KakaoTalkTranscriptReader {
         }
 
         if rows.isEmpty {
+            let started = readCost?.mark()
+            defer { readCost?.end(.collectCells, started) }
+            readCost?.add(.collectFallbackCalls)
             let cells = transcriptRoot.findAll(role: kAXCellRole, limit: max(targetRowCount * 2, 160), maxNodes: 2_000)
             rows.append(contentsOf: cells.compactMap(\.parent))
         }
 
+        let geometryStarted = readCost?.mark()
         let deduplicated = deduplicateElements(rows)
         var filtered = deduplicated
         if let inputFrame = inputElement.frame {
@@ -382,7 +405,9 @@ struct KakaoTalkTranscriptReader {
                 return rowFrame.maxY <= inputFrame.minY + 20
             }
         }
+        readCost?.end(.geometry, geometryStarted)
 
+        let sortStarted = readCost?.mark()
         let sorted = filtered.sorted { lhs, rhs in
             let lhsY = frameCache.frame(of: lhs)?.minY ?? .greatestFiniteMagnitude
             let rhsY = frameCache.frame(of: rhs)?.minY ?? .greatestFiniteMagnitude
@@ -393,9 +418,14 @@ struct KakaoTalkTranscriptReader {
             }
             return lhsY < rhsY
         }
+        readCost?.end(.sort, sortStarted)
 
         let recentWindow = max(messageLimit * 6, 80)
         let recentRows = Array(sorted.suffix(recentWindow))
+        readCost?.add(.rawRows, rows.count)
+        readCost?.add(.uniqueRows, deduplicated.count)
+        readCost?.add(.filteredRows, sorted.count)
+        readCost?.add(.recentRows, recentRows.count)
         runner.log("read: transcript rows raw=\(rows.count), unique=\(deduplicated.count), filtered=\(sorted.count), recent=\(recentRows.count)")
         // The cut removes nothing when the input really sits under the
         // transcript. When it does remove rows, say how many: a resolver that

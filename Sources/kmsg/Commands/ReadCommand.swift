@@ -216,6 +216,9 @@ struct ReadCommand: ParsableCommand {
                 let readPhase: ((String) -> Void)? = readDetail.map { detail in
                     { name in detail.begin(name) }
                 }
+                let readNote: ((String, String) -> Void)? = readDetail.map { detail in
+                    { key, value in detail.note(key, value) }
+                }
                 var detailSucceeded = false
                 defer { readDetail?.emitSummary(status: detailSucceeded ? "ok" : "fail") }
                 let result = try transcriptReader.readSnapshot(
@@ -223,7 +226,8 @@ struct ReadCommand: ParsableCommand {
                     fallbackChatTitle: resolution.effectiveChatTitle ?? requestedChat,
                     limit: limit,
                     chatTitleOverride: resolution.chatTitle,
-                    readPhase: readPhase
+                    readPhase: readPhase,
+                    readNote: readNote
                 )
                 detailSucceeded = true
                 return result
