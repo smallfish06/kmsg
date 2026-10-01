@@ -84,7 +84,7 @@ let observedFallback = parser.extractFallbackMessages(from: longFallbackRoot, li
 check("fallback limit remains unchanged", observedFallback.count == 3 && observedFallback.map(\.body) == legacyFallback.map(\.body))
 let recovered = run((0..<30).map { _ in UIElement(kAXRowRole) }, enabled: true, recollect: fixture())
 check("sparse recollection keeps real repeated rows", recovered.filter { $0.body == "repeat" }.count == 2)
-check("sparse recollection cannot certify stable observation", recovered.allSatisfy { $0.nativeObservation?.order == .uncertain })
+check("whole fresh sparse pass can certify its own coherent rows", recovered.allSatisfy { $0.nativeObservation?.order == .verified })
 let unknownTail = fixture()
 unknownTail[5].bounds = nil
 unknownTail[5].nodes[0].nodes[0].bounds = nil

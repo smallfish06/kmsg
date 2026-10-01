@@ -446,10 +446,39 @@ struct KakaoTalkTranscriptReader {
         recollectRows: (FrameCache) -> [UIElement],
         readPhase: ((String) -> Void)? = nil
     ) -> (messages: [TranscriptMessage], notes: [(key: String, value: String)]) {
+        /// Certification belongs to the selected parse, not to the entire retry
+        /// history. These are eligibility states only; the final source/geometry
+        /// reconciliation must still prove every returned physical row.
+        enum TranscriptParseProvenance {
+            case initial, freshSparse, heldSparse, retainedAfterSparseFailure, attributionRecovery, fallbackMixed
+
+            var permitsCertificate: Bool {
+                switch self {
+                case .initial, .freshSparse: return true
+                case .heldSparse, .retainedAfterSparseFailure, .attributionRecovery, .fallbackMixed: return false
+                }
+            }
+        }
+
+        struct TranscriptParsePass {
+            var messages: [TranscriptMessage]
+            let frameCache: FrameCache
+            let observationSources: TranscriptObservationSources?
+            var provenance: TranscriptParseProvenance
+        }
+
         var notes: [(key: String, value: String)] = []
-        let observationSources = TranscriptNativeObservation.isEnabled ? TranscriptObservationSources() : nil
-        frameCache.observationSources = observationSources
-        var observationStable = true
+        let observationsEnabled = TranscriptNativeObservation.isEnabled
+        let initialSources = observationsEnabled ? TranscriptObservationSources() : nil
+        func parsePass(from rows: [UIElement], cache: FrameCache,
+                       sources: TranscriptObservationSources?, provenance: TranscriptParseProvenance) -> TranscriptParsePass {
+            cache.observationSources = sources
+            return TranscriptParsePass(
+                messages: parseMessages(from: rows, transcriptRoot: transcriptRoot, limit: limit,
+                    includeSystemMessages: includeSystemMessages, referenceDate: referenceDate, frameCache: cache),
+                frameCache: cache, observationSources: sources, provenance: provenance
+            )
+        }
         // Each row analysis costs ~30ms of AX round-trips, so the floor of 60
         // made every limit-10 read analyze the entire visible transcript.
         // 3x the limit still leaves ample room for date separators, system
@@ -459,14 +488,8 @@ struct KakaoTalkTranscriptReader {
         let fallbackThreshold = max(3, min(limit / 2, 8))
 
         readPhase?("parse")
-        var messages = parseMessages(
-            from: rowsToAnalyze,
-            transcriptRoot: transcriptRoot,
-            limit: limit,
-            includeSystemMessages: includeSystemMessages,
-            referenceDate: referenceDate,
-            frameCache: frameCache
-        )
+        var selected = parsePass(from: rowsToAnalyze, cache: frameCache,
+                                 sources: initialSources, provenance: .initial)
 
         // A sparse parse right after opening means "not loaded yet", not
         // "short chat" — but waiting on the rows we already hold cannot fix it.
@@ -483,10 +506,9 @@ struct KakaoTalkTranscriptReader {
         //
         // So collect the rows AGAIN and parse those. A fresh FrameCache goes
         // with them: the old one only knows the dead rows' frames.
-        if messages.count < fallbackThreshold, rowsToAnalyze.count > messages.count * 2 {
-            observationStable = false
-            runner.log("read: sparse parse (\(messages.count) messages from \(rowsToAnalyze.count) rows); re-collecting rows")
-            notes.append((key: "sparse", value: "\(messages.count)/\(rowsToAnalyze.count)"))
+        if selected.messages.count < fallbackThreshold, rowsToAnalyze.count > selected.messages.count * 2 {
+            runner.log("read: sparse parse (\(selected.messages.count) messages from \(rowsToAnalyze.count) rows); re-collecting rows")
+            notes.append((key: "sparse", value: "\(selected.messages.count)/\(rowsToAnalyze.count)"))
             readPhase?("sparse.wait")
             Thread.sleep(forTimeInterval: 0.35)
             // How many of the rows we hold are childless now — the signature of
@@ -496,24 +518,25 @@ struct KakaoTalkTranscriptReader {
             notes.append((key: "held0", value: "\(childless)/\(rowsToAnalyze.count)"))
             readPhase?("sparse.collect")
             let freshCache = FrameCache()
-            freshCache.observationSources = observationSources
+            let freshSources = observationsEnabled ? TranscriptObservationSources() : nil
+            freshCache.observationSources = freshSources
             let freshRows = Array(recollectRows(freshCache).suffix(analysisBudget))
             let useFresh = !freshRows.isEmpty
             if useFresh {
                 notes.append((key: "fresh", value: "\(freshRows.count)"))
             }
             readPhase?("sparse.parse")
-            let reparsed = parseMessages(
-                from: useFresh ? freshRows : rowsToAnalyze,
-                transcriptRoot: transcriptRoot,
-                limit: limit,
-                includeSystemMessages: includeSystemMessages,
-                referenceDate: referenceDate,
-                frameCache: useFresh ? freshCache : frameCache
-            )
-            // Never trade a better first parse for a worse second one.
-            if reparsed.count >= messages.count {
-                messages = reparsed
+            let reparsed = parsePass(from: useFresh ? freshRows : rowsToAnalyze,
+                cache: useFresh ? freshCache : selected.frameCache,
+                sources: useFresh ? freshSources : selected.observationSources,
+                provenance: useFresh ? .freshSparse : .heldSparse)
+            // Select content and its proof ownership together. A discarded
+            // dead-row attempt cannot taint an entirely fresh, coherent pass.
+            // A held-row retry or rejected fresh pass still proves no recovery.
+            if reparsed.messages.count >= selected.messages.count {
+                selected = reparsed
+            } else {
+                selected.provenance = .retainedAfterSparseFailure
             }
         }
 
@@ -522,7 +545,8 @@ struct KakaoTalkTranscriptReader {
         // never runs in that case. Re-collect under this SAME transcript root with a
         // fresh frame cache, once; no focus change, title search or author guess.
         readPhase?("attribution")
-        let attribution = TranscriptAttributionRecovery.recover(messages, evidence: { message in
+        var attributionPass: TranscriptParsePass?
+        let attribution = TranscriptAttributionRecovery.recover(selected.messages, evidence: { message in
             let owner: String?
             if message.authorSource == "unattributed" {
                 owner = nil
@@ -538,56 +562,61 @@ struct KakaoTalkTranscriptReader {
                 boundsMissing: ["missing-frame", "missing-body-frame"].contains(message.authorUnresolvedReason ?? "")
             )
         }, reread: {
-            observationStable = false
             readPhase?("attr.wait")
             Thread.sleep(forTimeInterval: 0.35)
             readPhase?("attr.collect")
             let freshCache = FrameCache()
-            freshCache.observationSources = observationSources
+            let freshSources = observationsEnabled ? TranscriptObservationSources() : nil
+            freshCache.observationSources = freshSources
             let freshRows = Array(recollectRows(freshCache).suffix(analysisBudget))
             guard !freshRows.isEmpty else { return [] }
             readPhase?("attr.parse")
-            return parseMessages(
-                from: freshRows, transcriptRoot: transcriptRoot, limit: limit,
-                includeSystemMessages: includeSystemMessages, referenceDate: referenceDate,
-                frameCache: freshCache
-            )
+            let candidate = parsePass(from: freshRows, cache: freshCache,
+                                      sources: freshSources, provenance: .attributionRecovery)
+            attributionPass = candidate
+            return candidate.messages
         })
         if attribution.attempted {
-            messages = attribution.messages
+            // Recovery selects one complete array; it never merges rows.
+            // Keep that candidate's cache/source ownership when accepted, but
+            // attribution retries retain their existing uncertain proof policy.
+            if attribution.accepted, let candidate = attributionPass {
+                selected = candidate
+            }
+            selected.provenance = .attributionRecovery
             notes.append((key: "attrretry", value: "1"))
             notes.append((key: "attrcandidate", value: "\(attribution.unresolvedBefore)/\(attribution.unresolvedAfter)"))
             notes.append((key: "attraccepted", value: attribution.accepted ? "1" : "0"))
         }
 
-        runner.log("read: row parser messages=\(messages.count)")
+        runner.log("read: row parser messages=\(selected.messages.count)")
         if !notes.isEmpty {
-            notes.append((key: "reparse", value: "\(messages.count)"))
+            notes.append((key: "reparse", value: "\(selected.messages.count)"))
         }
 
-        if messages.isEmpty || messages.count < fallbackThreshold {
+        if selected.messages.isEmpty || selected.messages.count < fallbackThreshold {
             readPhase?("fallback")
-            observationStable = false
+            selected.provenance = .fallbackMixed
             let fallback = extractFallbackMessages(from: transcriptRoot, limit: limit, referenceDate: referenceDate,
-                                                   observationSources: observationSources)
+                                                   observationSources: selected.observationSources)
             runner.log("read: fallback messages=\(fallback.count)")
-            messages.append(contentsOf: fallback)
+            selected.messages.append(contentsOf: fallback)
             notes.append((key: "fb", value: "\(fallback.count)"))
         }
 
-        guard observationSources != nil else {
-            return (Array(deduplicateMessagesPreservingOrder(messages).suffix(limit)), notes)
+        guard selected.observationSources != nil else {
+            return (Array(deduplicateMessagesPreservingOrder(selected.messages).suffix(limit)), notes)
         }
-        let selection = TranscriptNativeObservation.select(messages.map { message in
+        let selection = TranscriptNativeObservation.select(selected.messages.map { message in
             TranscriptNativeObservation.Candidate(
                 source: message.nativeSource, legacyKey: messageDeduplicationFingerprint(message),
                 signature: [message.author ?? "", message.authorSource ?? "", message.timeRaw ?? "", message.date ?? "",
                             message.body, String(message.imageCount), String(message.linkCount), String(message.attachmentCount)]
             )
-        }, limit: limit, stable: observationStable)
+        }, limit: limit, stable: selected.provenance.permitsCertificate)
         let observationID = UUID().uuidString.lowercased()
         let observed = selection.indices.enumerated().map { index, sourceIndex in
-            var message = messages[sourceIndex]
+            var message = selected.messages[sourceIndex]
             message.nativeObservation = .init(id: observationID, index: index, count: selection.indices.count,
                                               order: selection.order, multiplicity: selection.multiplicity)
             return message
