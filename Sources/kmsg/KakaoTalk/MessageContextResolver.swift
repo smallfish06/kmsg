@@ -10,6 +10,7 @@ final class TranscriptReadCost {
     enum Count: Int, CaseIterable {
         case cacheCalls, cacheHits, shallowVisits, containerCalls, containerCandidates, bonusCalls, inputVisits
         case collectCalls, collectShallowVisits, collectFallbackCalls, rawRows, uniqueRows, filteredRows, recentRows
+        case collectUnknownRoles, collectIncompleteChildren, collectDepthFrontier, collectNonContainers
     }
     private var durations = Array(repeating: UInt64(0), count: Slice.allCases.count)
     private var counts = Array(repeating: 0, count: Count.allCases.count)
@@ -47,8 +48,10 @@ final class TranscriptReadCost {
                             [.cacheCalls, .cacheHits, .shallowVisits, .containerCalls, .containerCandidates, .bonusCalls, .inputVisits])
         let collection = tuple([.collectShallow, .collectContainers, .collectRows, .collectCells, .geometry, .sort],
                                [.collectCalls, .collectShallowVisits, .collectFallbackCalls, .rawRows, .uniqueRows, .filteredRows, .recentRows])
+        let walk = tuple([], [.collectUnknownRoles, .collectIncompleteChildren, .collectDepthFrontier, .collectNonContainers])
         write("costctx", context)
         write("costcol", collection)
+        write("costwalk", walk)
         if clipped { write("costclip", "1") }
     }
 }

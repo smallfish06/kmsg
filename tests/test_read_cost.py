@@ -66,14 +66,15 @@ struct WindowCostReader {
         cls.raw = result.stdout
 
     def test_actual_context_and_collection_preserve_ax_call_order_and_results(self):
-        self.assertEqual(len(self.data["cases"]), 7)
+        self.assertEqual(len(self.data["cases"]), 12)
         self.assertTrue(all(c["sameResult"] and c["sameAXCallsAndOrder"] for c in self.data["cases"]))
+        self.assertTrue(all(c["offClockCalls"] == 0 for c in self.data["cases"]))
 
     def test_numeric_fixed_schema_has_no_customer_or_ax_text(self):
         self.assertNotIn("CUSTOMER_SECRET_SENTINEL", self.raw)
         for case in self.data["cases"]:
-            self.assertEqual(set(case["notes"]), {"costctx", "costcol"})
-            for key, expected in [("costctx", 16), ("costcol", 14)]:
+            self.assertEqual(set(case["notes"]), {"costctx", "costcol", "costwalk"})
+            for key, expected in [("costctx", 16), ("costcol", 14), ("costwalk", 5)]:
                 value = case["notes"][key]
                 self.assertRegex(value, r"^1(?:/\d{1,5})+$")
                 self.assertEqual(len(value.split("/")), expected)
@@ -88,12 +89,29 @@ struct WindowCostReader {
         self.assertEqual(empty[9], 3)
         self.assertEqual(empty[10:], [0, 0, 0, 0])
 
+    def test_walk_faults_are_observed_without_changing_collection_policy(self):
+        cases = {c["mode"]: c for c in self.data["cases"] if c["kind"] == "collection"}
+        expected = {
+            "shallow": [0, 0, 0, 0], "empty": [0, 0, 0, 0],
+            "fallback": [0, 0, 0, 1], "role-failure": [300, 0, 0, 0],
+            "partial-role-failure": [150, 0, 0, 0], "children-failure": [0, 1, 0, 0],
+            "depth": [0, 0, 1, 0], "target-at-depth": [0, 0, 0, 0],
+        }
+        for name, counters in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(list(map(int, cases[name]["notes"]["costwalk"].split("/"))), [1] + counters)
+        # A partial unknown-role shallow pass still follows the old policy:
+        # some rows are enough to avoid fallback. These counters do not repair it.
+        partial = list(map(int, cases["partial-role-failure"]["notes"]["costcol"].split("/")))
+        self.assertEqual(partial[9:11], [0, 150])
+
     def test_actual_window_wrapper_emits_costs_on_context_and_collection_failure(self):
         cases = self.data["windowCases"]
         self.assertEqual(len(cases), 3)
         for case in cases:
             self.assertTrue(case["sameAXCallsAndOrder"])
-            self.assertEqual(set(case["notes"]), {"costctx", "costcol"})
+            self.assertEqual(set(case["notes"]), {"costctx", "costcol", "costwalk"})
+            self.assertEqual(case["offClockCalls"], 0)
             self.assertEqual(case["failed"], case["mode"] != "ok")
 
     def test_saturation_is_explicit_and_detail_line_fits_forwarding_budget(self):

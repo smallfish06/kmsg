@@ -337,18 +337,31 @@ struct KakaoTalkTranscriptReader {
         while depth < 4, !frontier.isEmpty, rows.count < targetRowCount {
             var nextFrontier: [UIElement] = []
             for container in frontier {
-                for child in container.children {
+                // Same single AX children read as before. Failure is counted,
+                // but retains the legacy empty-array traversal behavior.
+                let children = container.childrenRead()
+                if !children.complete { readCost?.add(.collectIncompleteChildren) }
+                for child in children.children {
                     readCost?.add(.collectShallowVisits)
-                    guard let role = child.role else { continue }
+                    guard let role = child.role else {
+                        readCost?.add(.collectUnknownRoles)
+                        continue
+                    }
                     if role == kAXRowRole {
                         rows.append(child)
                     } else if containerRoles.contains(role) {
                         nextFrontier.append(child)
+                    } else {
+                        readCost?.add(.collectNonContainers)
                     }
                 }
             }
             frontier = nextFrontier
             depth += 1
+        }
+        // Count only a stop caused by the depth bound, not by the row target.
+        if depth == 4, rows.count < targetRowCount {
+            readCost?.add(.collectDepthFrontier, frontier.count)
         }
         readCost?.end(.collectShallow, shallowStarted)
         if !rows.isEmpty {
