@@ -19,6 +19,7 @@ SOURCE = ROOT / "Sources/kmsg/KakaoTalk/ChatListScanner.swift"
 
 STUBS = r'''
 import Foundation
+import ApplicationServices.HIServices
 let kAXRoleAttribute = "role", kAXChildrenAttribute = "children"
 let kAXValueAttribute = "value", kAXTitleAttribute = "title"
 let kAXIdentifierAttribute = "identifier"
@@ -72,6 +73,19 @@ struct UIElement {
             default: return nil
             }
         }
+    }
+    func batchAttributes(_ names: [String], observingRaw: @escaping (AXError, [AnyObject]?) -> Void) -> [Any?] {
+        let values = batchAttributes(names)
+        if axElement.batchFails { observingRaw(.cannotComplete, nil) }
+        else {
+            let raw: [AnyObject] = values.map { value in
+                if let value { return value as AnyObject }
+                var error = AXError.noValue
+                return AXValueCreate(.axError, &error)!
+            }
+            observingRaw(.success, raw)
+        }
+        return values
     }
     func findAll(role expected: String, limit: Int, maxNodes: Int) -> [UIElement] {
         var queue = [self], i = 0, result: [UIElement] = []
@@ -241,7 +255,8 @@ print(String(decoding: output, as: UTF8.self))
 @unittest.skipIf(shutil.which("swiftc") is None, "swiftc not available")
 class ChatListTitleHintTests(unittest.TestCase):
     def test_production_scanner_preserves_order_and_fallback(self):
-        source = SOURCE.read_text().replace("import ApplicationServices.HIServices\n", "")
+        evidence = (ROOT / "Sources/kmsg/KakaoTalk/ChatListHintEvidence.swift").read_text()
+        source = evidence + SOURCE.read_text().replace("import ApplicationServices.HIServices\n", "")
         sdk_args = []
         if sys.platform == "darwin" and not os.environ.get("SDKROOT"):
             sdk = subprocess.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], capture_output=True, text=True)

@@ -225,11 +225,6 @@ struct ChatListScanner {
     // original single walk; the fast path is for a previously deep row.
     static let minimumTitleHintIndex = 25
 
-    // A new title-only retry accepts at most one existing full-row bound of
-    // title-less content. Discovering the first excess row still costs its
-    // bounded read before falling back. No second retry is possible.
-    static let maximumKnownNoneNodes = 100
-
     func scanUntilTitle(
         _ expected: String,
         in window: UIElement,
@@ -244,80 +239,10 @@ struct ChatListScanner {
                 rowsScanned: 0, usedTitleHint: false, titleNodes: 0, contentNodes: 0,
                 hintGate: .containerUnavailable, availableRows: 0)
         }
-        var directOrder: (role: String, children: [UIElement])?
-        let rows = collectChatItems(from: container, limit: limit) { role, children in
-            directOrder = (role, children)
-        }
+        let rows = collectChatItems(from: container, limit: limit)
         var titleNodes = 0
         var contentNodes = 0
         var hintGate: ChatListTitleHintGate = .noHint
-        let evidence = preferredIndex.map { $0 >= Self.minimumTitleHintIndex } == true
-            ? ChatListHintEvidence.make() : nil
-        defer { evidence?.gate = hintGate.rawValue; evidence?.emit() }
-
-        func titleRead(_ row: UIElement) -> RowContent {
-            let content = collectRowContent(from: row, titleOnly: true)
-            titleNodes += content.nodesVisited
-            evidence?.record(content.titleObservation, candidate: extractTitleCandidate(from: content))
-            return content
-        }
-
-        // Do not continue using earlier title observations after newly proving
-        // a semantic none. Restart at row zero, just as the old full fallback
-        // does, but gather only title evidence. Thus a duplicate that appeared
-        // during the first prefix is reconsidered before the deep target.
-        func retryKnownNonePrefix(through lastIndex: Int) -> Int? {
-            guard let directOrder else { evidence?.guardFailure = 2; return nil }
-            evidence?.restarts = 1
-            var noneNodes = 0
-            for index in 0...lastIndex {
-                if shouldStop?() == true {
-                    hintGate = .deadline; evidence?.guardFailure = 3; return nil
-                }
-                let checked = titleRead(rows[index])
-                evidence?.guardRows += 1
-                evidence?.guardNodes += checked.nodesVisited
-                let candidate = extractTitleCandidate(from: checked)
-                guard checked.titleObservation.issues == 0 else {
-                    evidence?.guardFailure = 4; return nil
-                }
-                if candidate == nil {
-                    noneNodes += checked.nodesVisited
-                    guard noneNodes <= Self.maximumKnownNoneNodes else {
-                        evidence?.guardFailure = 1; return nil
-                    }
-                    evidence?.admitted += 1
-                    continue
-                }
-                guard candidate == expected else { continue }
-                if shouldStop?() == true {
-                    hintGate = .deadline; evidence?.guardFailure = 3; return nil
-                }
-                // The original direct-child sequence was already read while
-                // collecting rows. One fresh batch rejects reorder/replacement
-                // without another row-role traversal or new identity authority.
-                evidence?.order = 1
-                let current = container.batchAttributes([kAXRoleAttribute, kAXChildrenAttribute])
-                guard current[0] as? String == directOrder.role,
-                      let children = current[1] as? [AXUIElement],
-                      children.count >= directOrder.children.count,
-                      zip(directOrder.children, children).allSatisfy({ CFEqual($0.0.axElement, $0.1) })
-                else { hintGate = .changed; evidence?.guardFailure = 5; return nil }
-                if shouldStop?() == true {
-                    hintGate = .deadline; evidence?.guardFailure = 3; return nil
-                }
-                evidence?.target = 1
-                let target = titleRead(rows[index])
-                guard target.titleObservation.issues == 0, extractTitleCandidate(from: target) == expected else {
-                    hintGate = .changed; evidence?.guardFailure = 6; return nil
-                }
-                if shouldStop?() == true {
-                    hintGate = .deadline; evidence?.guardFailure = 3; return nil
-                }
-                return index
-            }
-            return nil
-        }
 
         // The registry position is only a performance hint. Validate it on the
         // current rows, then still find the FIRST exact title from the
@@ -337,7 +262,8 @@ struct ChatListScanner {
             }
         }
         if let preferredIndex, hintGate == .titleMismatch {
-            let hintedContent = titleRead(rows[preferredIndex])
+            let hintedContent = collectRowContent(from: rows[preferredIndex], titleOnly: true)
+            titleNodes += hintedContent.nodesVisited
             let hintedTitle = extractTitle(from: hintedContent)
             if hintedTitle == "(Unknown Chat)" { hintGate = .hintUnreadable }
             if hintedTitle == expected {
@@ -352,29 +278,21 @@ struct ChatListScanner {
                     }
                     // Re-read even the hinted row: its first validation is not
                     // authority to accept a stale title after the prefix walk.
-                    let content = titleRead(rows[index])
+                    let content = collectRowContent(from: rows[index], titleOnly: true)
+                    titleNodes += content.nodesVisited
                     let title = extractTitle(from: content)
                     // Missing AX title data cannot certify this prefix as
                     // containing no earlier exact match. Re-read it through
                     // the original path instead of trusting the hint.
                     if title == "(Unknown Chat)" {
                         hintGate = .prefixUnreadable
-                        if expected != "(Unknown Chat)", extractTitleCandidate(from: content) == nil,
-                           content.titleObservation.issues == 0,
-                           let matchedIndex = retryKnownNonePrefix(through: preferredIndex) {
-                            hintGate = hintTab == nil ? .hitUnknownTab : .hit
-                            return ChatListTitleScanResult(match: rows[matchedIndex], snapshots: [], stoppedEarly: false,
-                                rowsScanned: matchedIndex + 1, usedTitleHint: true, titleNodes: titleNodes, contentNodes: 0,
-                                hintGate: hintGate, availableRows: rows.count)
-                        }
                         break
                     }
                     if title == expected {
                         trace?("chats: validated title hint matched first row \(index + 1)")
-                        hintGate = hintTab == nil ? .hitUnknownTab : .hit
                         return ChatListTitleScanResult(match: rows[index], snapshots: [], stoppedEarly: false,
                             rowsScanned: index + 1, usedTitleHint: true, titleNodes: titleNodes, contentNodes: 0,
-                            hintGate: hintGate, availableRows: rows.count)
+                            hintGate: hintTab == nil ? .hitUnknownTab : .hit, availableRows: rows.count)
                     }
                 }
                 // AX rows may have changed while walking. Discard the partial
@@ -557,15 +475,11 @@ struct ChatListScanner {
         }
     }
 
-    private func collectChatItems(
-        from container: UIElement, limit: Int,
-        observeDirectOrder: ((String, [UIElement]) -> Void)? = nil
-    ) -> [UIElement] {
+    private func collectChatItems(from container: UIElement, limit: Int) -> [UIElement] {
         let role = container.role ?? ""
 
         if role == kAXListRole {
             let children = Array(container.children.prefix(limit))
-            observeDirectOrder?(role, children)
             return deduplicateElements(children)
         }
 
@@ -576,9 +490,7 @@ struct ChatListScanner {
         var directRows: [UIElement] = []
         directRows.reserveCapacity(min(limit, children.count))
         var sawDirectRow = false
-        var prefixCount = 0
         for child in children {
-            prefixCount += 1
             guard child.role == kAXRowRole else { continue }
             sawDirectRow = true
             if directRows.contains(where: { CFEqual($0.axElement, child.axElement) }) { continue }
@@ -586,10 +498,6 @@ struct ChatListScanner {
             if directRows.count >= limit { break }
         }
         if sawDirectRow {
-            // Retain no more handles than the existing 500-row fallback's
-            // 8x traversal horizon. Large mixed containers simply cannot use
-            // the new known-none retry; their original result is unchanged.
-            if prefixCount <= 4000 { observeDirectOrder?(role, Array(children.prefix(prefixCount))) }
             return directRows
         }
 
@@ -622,7 +530,6 @@ struct ChatListScanner {
         let textNodes: [RowTextNode]
         let sawClockText: Bool
         let nodesVisited: Int
-        let titleObservation: ChatListTitleObservation
     }
 
     private static let rowAttributeNames = [
@@ -639,16 +546,7 @@ struct ChatListScanner {
         maxNodes: Int = 100,
         maxTextNodes: Int = 24
     ) -> RowContent {
-        var titleObservation = ChatListTitleObservation()
-        func read(_ node: UIElement) -> [Any?] {
-            if titleOnly {
-                return node.batchAttributes(Self.rowAttributeNames) { error, raw in
-                    titleObservation.observe(error: error, raw: raw)
-                }
-            }
-            return node.batchAttributes(Self.rowAttributeNames)
-        }
-        let rowValues = read(row)
+        let rowValues = row.batchAttributes(Self.rowAttributeNames)
         let rowRole = rowValues[0] as? String
         let rowChildren = (rowValues[1] as? [AXUIElement])?.map { UIElement($0) } ?? []
         let rowValue = rowValues[2] as? String
@@ -663,7 +561,7 @@ struct ChatListScanner {
         if titleOnly, titleCandidate(title: rowTitle, value: rowValue, role: rowRole, identifier: rowIdentifier) != nil {
             return RowContent(
                 rowRole: rowRole, rowValue: rowValue, rowTitle: rowTitle, rowIdentifier: rowIdentifier,
-                textNodes: [], sawClockText: false, nodesVisited: visited, titleObservation: titleObservation
+                textNodes: [], sawClockText: false, nodesVisited: visited
             )
         }
 
@@ -675,7 +573,7 @@ struct ChatListScanner {
             index += 1
             visited += 1
 
-            let values = read(current)
+            let values = current.batchAttributes(Self.rowAttributeNames)
             let role = values[0] as? String ?? ""
             let children = (values[1] as? [AXUIElement])?.map { UIElement($0) } ?? []
 
@@ -701,29 +599,15 @@ struct ChatListScanner {
             queue.append(contentsOf: children)
         }
 
-        // A successful title hit deliberately leaves a frontier. Only a
-        // title-less result needs exhaustive evidence; quota/cut is unknown.
-        if titleOnly {
-            let hasTitle = textNodes.contains { node in
-                node.role == kAXStaticTextRole && titleCandidate(
-                    title: node.title, value: node.value, role: node.role, identifier: node.identifier
-                ) != nil
-            }
-            if !hasTitle, (index < queue.count || visited > maxNodes) { titleObservation.issues |= 32 }
-        }
         return RowContent(
             rowRole: rowRole, rowValue: rowValue, rowTitle: rowTitle, rowIdentifier: rowIdentifier,
-            textNodes: textNodes, sawClockText: sawClockText, nodesVisited: visited, titleObservation: titleObservation
+            textNodes: textNodes, sawClockText: sawClockText, nodesVisited: visited
         )
     }
 
     // MARK: - Classification (no AX round-trips past this point)
 
     private func extractTitle(from content: RowContent) -> String {
-        extractTitleCandidate(from: content) ?? "(Unknown Chat)"
-    }
-
-    private func extractTitleCandidate(from content: RowContent) -> String? {
         if let title = titleCandidate(
             title: content.rowTitle, value: content.rowValue,
             role: content.rowRole, identifier: content.rowIdentifier
@@ -735,7 +619,7 @@ struct ChatListScanner {
                 return title
             }
         }
-        return nil
+        return "(Unknown Chat)"
     }
 
     private func extractPreview(from content: RowContent, title: String) -> String? {

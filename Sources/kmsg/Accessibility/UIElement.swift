@@ -215,8 +215,17 @@ public final class UIElement: @unchecked Sendable {
         batchAttributes(names, diagnoseStructure: false)
     }
 
+    /// Observe the status of this same batch before optional slots are erased.
+    /// The callback supplies no values to the traversal and performs no AX IO.
+    func batchAttributes(
+        _ names: [String], observingRaw: @escaping (AXError, [AnyObject]?) -> Void
+    ) -> [Any?] {
+        batchAttributes(names, diagnoseStructure: false, observeRaw: observingRaw)
+    }
+
     private func batchAttributes(
-        _ names: [String], diagnoseStructure: Bool, observeAbsence: ((Bool) -> Void)? = nil
+        _ names: [String], diagnoseStructure: Bool, observeAbsence: ((Bool) -> Void)? = nil,
+        observeRaw: ((AXError, [AnyObject]?) -> Void)? = nil
     ) -> [Any?] {
         var values: CFArray?
         let diagnostics = AuthReadDiagnostics.current
@@ -240,6 +249,7 @@ public final class UIElement: @unchecked Sendable {
                 roleIsString: raw?.count == 2 && raw?[0] is String,
                 childrenAreElements: raw?.count == 2 && raw?[1] is [AXUIElement])
         }
+        observeRaw?(error, values as? [AnyObject])
         if let observeAbsence {
             var absence = false
             if error == .success, let raw = values as? [AnyObject], raw.count == 2,
