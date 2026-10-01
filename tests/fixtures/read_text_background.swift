@@ -25,6 +25,8 @@ final class UIElement {
     var childrenError: AXError?
     var invalidChildrenType = false
     var children: [UIElement] { childReads += 1; return nodes }
+    var childrenReadComplete = true
+    func childrenRead() -> (children: [UIElement], complete: Bool) { (children, childrenReadComplete) }
     var frame: CGRect? { frameReads += 1; return bounds }
     init(_ role: String, _ frame: CGRect? = nil, _ value: String? = nil, children: [UIElement] = []) {
         self.role = role; bounds = frame; stringValue = value; nodes = children

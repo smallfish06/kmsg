@@ -506,7 +506,7 @@ struct KakaoTalkTranscriptReader {
         func parsePass(from rows: [UIElement], cache: FrameCache,
                        sources: TranscriptObservationSources?, provenance: TranscriptParseProvenance) -> TranscriptParsePass {
             cache.observationSources = sources
-            cache.readEvidence?.resetHelp()
+            cache.readEvidence?.resetParsing()
             let messages = parseMessages(from: rows, transcriptRoot: transcriptRoot, limit: limit,
                 includeSystemMessages: includeSystemMessages, referenceDate: referenceDate, frameCache: cache)
             return TranscriptParsePass(
@@ -655,6 +655,12 @@ struct KakaoTalkTranscriptReader {
             readPhase?("evidence")
             let selectedSources = selection.indices.map { selected.messages[$0].nativeSource }
             let last = selectedSources.last ?? nil
+            let lastCollectedRowSelection: Int
+            if selected.frameCache.lastCollectedRow == nil { lastCollectedRowSelection = 0 }
+            else if sources.matches(last?.row, selected.frameCache.lastCollectedRow) { lastCollectedRowSelection = 1 }
+            else if selectedSources.contains(where: { sources.matches($0?.row, selected.frameCache.lastCollectedRow) }) {
+                lastCollectedRowSelection = 2
+            } else { lastCollectedRowSelection = 3 }
             let pass: Int
             switch selected.provenance {
             case .initial: pass = 1
@@ -669,6 +675,7 @@ struct KakaoTalkTranscriptReader {
                 lastRowSourcePresent: last?.row != nil, lastBodySourcePresent: last?.body != nil,
                 lastCollectedRowCompared: last?.row != nil && selected.frameCache.lastCollectedRow != nil,
                 lastCollectedRowMatches: sources.matches(last?.row, selected.frameCache.lastCollectedRow),
+                lastCollectedRowSelection: lastCollectedRowSelection,
                 readIdentifier: { sources.readIdentifier($0) })
         }
         let observationID = UUID().uuidString.lowercased()
@@ -755,6 +762,10 @@ struct KakaoTalkTranscriptReader {
         var lastKnownDate: String?
 
         for (offset, analysis) in analyses.enumerated() {
+            let lastRowEvidence = frameCache.readEvidence.flatMap { evidence in
+                frameCache.observationSources?.matches(analysis.nativeSource?.row, frameCache.lastCollectedRow) == true
+                    ? evidence : nil
+            }
             let side = analysis.side
             // A right-side (our) bubble or a system row ends the other party's
             // run. An unknown side does NOT: it is a non-verdict (the row's AX
@@ -782,6 +793,7 @@ struct KakaoTalkTranscriptReader {
                 MessageBodyCandidate(body: "[사진]", frame: $0)
             }
             guard let bodyCandidate else {
+                lastRowEvidence?.recordLastRowDisposition(.noBody)
                 if skippedLogs < 10 {
                     if analysis.isSystemLikeRow {
                         runner.log("read: row[\(offset + 1)] skipped (system row)")
@@ -798,12 +810,14 @@ struct KakaoTalkTranscriptReader {
             }
 
             if analysis.isSystemLikeRow, !includeSystemMessages {
+                lastRowEvidence?.recordLastRowDisposition(.systemFiltered)
                 if skippedLogs < 10 {
                     runner.log("read: row[\(offset + 1)] skipped (system-like content)")
                     skippedLogs += 1
                 }
                 continue
             }
+            lastRowEvidence?.recordLastRowDisposition(.emitted)
 
             if let axHelpDate = analysis.axHelpDate {
                 lastKnownDate = axHelpDate
@@ -960,7 +974,17 @@ struct KakaoTalkTranscriptReader {
         referenceDate: Date,
         frameCache: FrameCache
     ) -> RowAnalysis {
-        let directCells = row.children.filter { $0.role == kAXCellRole }
+        let rowChildren: [UIElement]
+        if let evidence = frameCache.readEvidence {
+            // The same children read as the ordinary parser, with its typed
+            // completion status retained only for the collection's last row.
+            let read = row.childrenRead()
+            rowChildren = read.children
+            if let last = frameCache.lastCollectedRow, CFEqual(row.axElement, last) {
+                evidence.recordLastRowAnalysis(childrenComplete: read.complete)
+            }
+        } else { rowChildren = row.children }
+        let directCells = rowChildren.filter { $0.role == kAXCellRole }
         let containers = directCells.isEmpty ? [row] : directCells
 
         var bodyCandidates: [MessageBodyCandidate] = []
@@ -2052,13 +2076,10 @@ private final class TranscriptObservationSources {
     func readIdentifier(_ identity: Int) -> TranscriptReadEvidenceDiagnostics.IdentifierSample {
         guard elements.indices.contains(identity) else { return .failed }
         do {
-            let value: String = try UIElement(elements[identity]).attribute(kAXIdentifierAttribute)
-            guard value.utf8.count <= 512 else { return .oversized }
-            return .value(value)
+            let value: AnyObject = try UIElement(elements[identity]).attribute(kAXIdentifierAttribute)
+            return TranscriptReadEvidenceDiagnostics.identifierSample(value)
         } catch AccessibilityError.axError(let error) {
-            if error == .attributeUnsupported || error == .notImplemented { return .unsupported }
-            if error == .noValue { return .noValue }
-            return .failed
+            return TranscriptReadEvidenceDiagnostics.identifierError(error)
         } catch {
             return .failed
         }

@@ -167,7 +167,7 @@ class ReadEvidenceDiagnosticsTests(unittest.TestCase):
     def test_one_slow_identifier_query_prevents_additional_diagnostic_queries(self):
         self.assertEqual(self.data["slowIdentifierCalls"],1)
         self.assertEqual(len(self.data["slowLines"]),2)
-        values = list(map(int,self.data["slowLines"][1].split("ident=",1)[1].split("/")))
+        values = list(map(int,self.data["slowLines"][1].split("ident=",1)[1].split()[0].split("/")))
         self.assertEqual(values[1],1)  # actual calls
         self.assertEqual(values[-1],5)  # skipped by the launch budget
         self.assertGreaterEqual(values[-2],100)
@@ -187,6 +187,10 @@ class ReadEvidenceDiagnosticsTests(unittest.TestCase):
         self.assertEqual(sum("part=2" in line for line in lines),3)
         self.assertTrue(any("pass=2" in line for line in lines))
         for line in lines:
-            self.assertRegex(line,r"^\[kmsg\] read-evidence total=[0-9.]+ status=ok part=[12] schema=1 ")
+            self.assertRegex(line,r"^\[kmsg\] read-evidence total=[0-9.]+ status=ok part=[12] schema=2 ")
         for first, second in zip(lines[::2],lines[1::2]):
             self.assertEqual(first.split("total=",1)[1].split()[0],second.split("total=",1)[1].split()[0])
+            for key, length, line in [("help",9,first),("end",20,first),("ident",20,second),("idstat",41,second)]:
+                values=list(map(int,line.split(key+"=",1)[1].split()[0].split("/")))
+                self.assertEqual(len(values),length)
+                self.assertEqual(values[0],2)
