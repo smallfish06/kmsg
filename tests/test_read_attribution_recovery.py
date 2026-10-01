@@ -19,7 +19,8 @@ import Foundation
 import CoreGraphics
 struct UIElement { let children = [1]; var frame: CGRect? = CGRect(x: 0, y: 0, width: 100, height: 500) }
 enum MessageSide { case left, right, unknown }
-final class FrameCache {}
+final class TranscriptObservationSources {}
+final class FrameCache { var observationSources: TranscriptObservationSources? }
 struct Runner { func log(_ value: String) {} }
 struct TranscriptMessage: Equatable {
     let author: String?
@@ -29,6 +30,9 @@ struct TranscriptMessage: Equatable {
     let date: String? = "2026-09-30"
     let imageCount = 0, linkCount = 0, attachmentCount = 0
     let isSystem = false
+    let timeRaw: String? = nil
+    let nativeSource: TranscriptNativeObservation.Source? = nil
+    var nativeObservation: TranscriptNativeObservation.Metadata? = nil
 }
 final class Parser {
     let runner = Runner()
@@ -43,10 +47,12 @@ final class Parser {
         precondition(!snapshots.isEmpty, "unbounded native retry")
         return snapshots.removeFirst()
     }
-    func extractFallbackMessages(from: UIElement, limit: Int, referenceDate: Date) -> [TranscriptMessage] {
+    func extractFallbackMessages(from: UIElement, limit: Int, referenceDate: Date,
+                                 observationSources: TranscriptObservationSources? = nil) -> [TranscriptMessage] {
         fallbacks += 1; return []
     }
     func deduplicateMessagesPreservingOrder(_ messages: [TranscriptMessage]) -> [TranscriptMessage] { messages }
+    func messageDeduplicationFingerprint(_ message: TranscriptMessage) -> String { message.body }
 '''
 
 FIXTURES = r'''
@@ -161,7 +167,8 @@ class ReadAttributionRecoveryTests(unittest.TestCase):
                 sdk = subprocess.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], capture_output=True, text=True)
                 if sdk.returncode == 0:
                     sdk_args = ["-sdk", sdk.stdout.strip()]
-            build = subprocess.run(["swiftc", *sdk_args, str(RECOVERY), str(main), "-o", str(binary)], capture_output=True, text=True)
+            observation = ROOT / "Sources/kmsg/KakaoTalk/TranscriptNativeObservation.swift"
+            build = subprocess.run(["swiftc", *sdk_args, str(RECOVERY), str(observation), str(main), "-o", str(binary)], capture_output=True, text=True)
             self.assertEqual(build.returncode, 0, build.stderr)
             result = subprocess.run([str(binary)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

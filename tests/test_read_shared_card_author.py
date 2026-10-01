@@ -121,7 +121,8 @@ class ReadSharedCardAuthorTests(unittest.TestCase):
                 sdk = subprocess.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], capture_output=True, text=True)
                 if sdk.returncode == 0:
                     sdk_args = ["-sdk", sdk.stdout.strip()]
-            build = subprocess.run(["swiftc", *sdk_args, str(EVIDENCE), str(main), "-o", str(binary)], capture_output=True, text=True)
+            observation = ROOT / "Sources/kmsg/KakaoTalk/TranscriptNativeObservation.swift"
+            build = subprocess.run(["swiftc", *sdk_args, str(EVIDENCE), str(observation), str(main), "-o", str(binary)], capture_output=True, text=True)
             self.assertEqual(build.returncode, 0, build.stderr)
             run = subprocess.run([str(binary)], capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)

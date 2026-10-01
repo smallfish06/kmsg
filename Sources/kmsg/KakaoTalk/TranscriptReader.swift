@@ -44,6 +44,10 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
     /// optional preserves the existing JSON contract for normal reads.
     let imagePaths: [String]?
     let imageSHA256: [String]?
+    /// Read-scoped parser provenance; never an AX or permanent message ID.
+    var nativeObservation: TranscriptNativeObservation.Metadata?
+    /// Unencoded evidence retained through the row/fallback merge only.
+    let nativeSource: TranscriptNativeObservation.Source?
 
     var hasImage: Bool {
         imageCount > 0
@@ -67,6 +71,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         case attachmentCount = "attachment_count"
         case imagePaths = "image_paths"
         case imageSHA256 = "image_sha256"
+        case nativeObservation = "native_observation"
     }
 
     init(
@@ -85,7 +90,9 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         date: String? = nil,
         imageFrames: [CGRect] = [],
         imagePaths: [String]? = nil,
-        imageSHA256: [String]? = nil
+        imageSHA256: [String]? = nil,
+        nativeObservation: TranscriptNativeObservation.Metadata? = nil,
+        nativeSource: TranscriptNativeObservation.Source? = nil
     ) {
         self.author = author
         self.authorSource = authorSource
@@ -103,6 +110,8 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         self.imageFrames = imageFrames
         self.imagePaths = imagePaths
         self.imageSHA256 = imageSHA256
+        self.nativeObservation = nativeObservation
+        self.nativeSource = nativeSource
     }
 
     func encode(to encoder: Encoder) throws {
@@ -120,6 +129,7 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
         try container.encode(attachmentCount, forKey: .attachmentCount)
         try container.encodeIfPresent(imagePaths, forKey: .imagePaths)
         try container.encodeIfPresent(imageSHA256, forKey: .imageSHA256)
+        try container.encodeIfPresent(nativeObservation, forKey: .nativeObservation)
     }
 
     func withCapturedImages(paths: [String], sha256: [String]) -> TranscriptMessage {
@@ -139,7 +149,9 @@ struct TranscriptMessage: Encodable, Equatable, Sendable {
             date: date,
             imageFrames: imageFrames,
             imagePaths: paths,
-            imageSHA256: sha256
+            imageSHA256: sha256,
+            nativeObservation: nativeObservation,
+            nativeSource: nativeSource
         )
     }
 }
@@ -405,6 +417,9 @@ struct KakaoTalkTranscriptReader {
         readPhase: ((String) -> Void)? = nil
     ) -> (messages: [TranscriptMessage], notes: [(key: String, value: String)]) {
         var notes: [(key: String, value: String)] = []
+        let observationSources = TranscriptNativeObservation.isEnabled ? TranscriptObservationSources() : nil
+        frameCache.observationSources = observationSources
+        var observationStable = true
         // Each row analysis costs ~30ms of AX round-trips, so the floor of 60
         // made every limit-10 read analyze the entire visible transcript.
         // 3x the limit still leaves ample room for date separators, system
@@ -439,6 +454,7 @@ struct KakaoTalkTranscriptReader {
         // So collect the rows AGAIN and parse those. A fresh FrameCache goes
         // with them: the old one only knows the dead rows' frames.
         if messages.count < fallbackThreshold, rowsToAnalyze.count > messages.count * 2 {
+            observationStable = false
             runner.log("read: sparse parse (\(messages.count) messages from \(rowsToAnalyze.count) rows); re-collecting rows")
             notes.append((key: "sparse", value: "\(messages.count)/\(rowsToAnalyze.count)"))
             readPhase?("sparse.wait")
@@ -450,6 +466,7 @@ struct KakaoTalkTranscriptReader {
             notes.append((key: "held0", value: "\(childless)/\(rowsToAnalyze.count)"))
             readPhase?("sparse.collect")
             let freshCache = FrameCache()
+            freshCache.observationSources = observationSources
             let freshRows = Array(recollectRows(freshCache).suffix(analysisBudget))
             let useFresh = !freshRows.isEmpty
             if useFresh {
@@ -491,10 +508,12 @@ struct KakaoTalkTranscriptReader {
                 boundsMissing: ["missing-frame", "missing-body-frame"].contains(message.authorUnresolvedReason ?? "")
             )
         }, reread: {
+            observationStable = false
             readPhase?("attr.wait")
             Thread.sleep(forTimeInterval: 0.35)
             readPhase?("attr.collect")
             let freshCache = FrameCache()
+            freshCache.observationSources = observationSources
             let freshRows = Array(recollectRows(freshCache).suffix(analysisBudget))
             guard !freshRows.isEmpty else { return [] }
             readPhase?("attr.parse")
@@ -518,13 +537,32 @@ struct KakaoTalkTranscriptReader {
 
         if messages.isEmpty || messages.count < fallbackThreshold {
             readPhase?("fallback")
-            let fallback = extractFallbackMessages(from: transcriptRoot, limit: limit, referenceDate: referenceDate)
+            observationStable = false
+            let fallback = extractFallbackMessages(from: transcriptRoot, limit: limit, referenceDate: referenceDate,
+                                                   observationSources: observationSources)
             runner.log("read: fallback messages=\(fallback.count)")
             messages.append(contentsOf: fallback)
             notes.append((key: "fb", value: "\(fallback.count)"))
         }
 
-        return (Array(deduplicateMessagesPreservingOrder(messages).suffix(limit)), notes)
+        guard observationSources != nil else {
+            return (Array(deduplicateMessagesPreservingOrder(messages).suffix(limit)), notes)
+        }
+        let selection = TranscriptNativeObservation.select(messages.map { message in
+            TranscriptNativeObservation.Candidate(
+                source: message.nativeSource, legacyKey: messageDeduplicationFingerprint(message),
+                signature: [message.author ?? "", message.authorSource ?? "", message.timeRaw ?? "", message.date ?? "",
+                            message.body, String(message.imageCount), String(message.linkCount), String(message.attachmentCount)]
+            )
+        }, limit: limit, stable: observationStable)
+        let observationID = UUID().uuidString.lowercased()
+        let observed = selection.indices.enumerated().map { index, sourceIndex in
+            var message = messages[sourceIndex]
+            message.nativeObservation = .init(id: observationID, index: index, count: selection.indices.count,
+                                              order: selection.order, multiplicity: selection.multiplicity)
+            return message
+        }
+        return (observed, notes)
     }
 
     private func parseMessages(
@@ -671,7 +709,8 @@ struct KakaoTalkTranscriptReader {
                     isSystem: true,
                     logicalTimestamp: currentDateAnchor,
                     date: resolvedDate,
-                    imageFrames: analysis.imageFrames
+                    imageFrames: analysis.imageFrames,
+                    nativeSource: analysis.nativeSource
                 )
                 messages.append(message)
                 continue
@@ -731,7 +770,8 @@ struct KakaoTalkTranscriptReader {
                     referenceDate: referenceDate
                 ),
                 date: resolvedDate,
-                imageFrames: analysis.imageFrames
+                imageFrames: analysis.imageFrames,
+                nativeSource: analysis.nativeSource
             )
             messages.append(message)
             if selectedLogs < 10 {
@@ -929,7 +969,8 @@ struct KakaoTalkTranscriptReader {
                     runner.log("read: link title used as fallback")
                 }
 
-                let candidate = MessageBodyCandidate(body: resolved, frame: frameCache.frame(of: textArea))
+                let candidate = MessageBodyCandidate(body: resolved, frame: frameCache.frame(of: textArea),
+                                                     nativeBody: frameCache.observationSources?.identity(of: textArea))
                 bodyCandidates.append(candidate)
                 if hasDirectTextImagePair { siblingBody = candidate }
             }
@@ -1006,11 +1047,21 @@ struct KakaoTalkTranscriptReader {
             attachmentCount: attachmentCount,
             isSystemLikeRow: systemLikeRow,
             axHelpDate: rowHelpDate,
-            sideFailure: sideFailure
+            sideFailure: sideFailure,
+            nativeSource: frameCache.observationSources.map { sources in
+                TranscriptNativeObservation.Source(
+                    row: sources.identity(of: row), body: bestBody?.nativeBody,
+                    rowFrame: cachedRowFrame, bodyFrame: bestBody?.frame,
+                    origin: .rowParser,
+                    ambiguous: Set(bodyCandidates.compactMap(\.nativeBody)).count != 1
+                        || bodyCandidates.contains { $0.nativeBody == nil }
+                )
+            }
         )
     }
 
-    private func extractFallbackMessages(from transcriptRoot: UIElement, limit: Int, referenceDate: Date) -> [TranscriptMessage] {
+    private func extractFallbackMessages(from transcriptRoot: UIElement, limit: Int, referenceDate: Date,
+                                         observationSources: TranscriptObservationSources? = nil) -> [TranscriptMessage] {
         var messages: [TranscriptMessage] = []
         let textAreas = transcriptRoot.findAll(role: kAXTextAreaRole, limit: max(limit * 80, 1_200), maxNodes: 6_000)
         let recentTextAreas = Array(sortElementsByReadingOrder(textAreas).suffix(max(limit * 20, 240)))
@@ -1044,7 +1095,12 @@ struct KakaoTalkTranscriptReader {
                         dateAnchor: nil,
                         referenceDate: referenceDate
                     ),
-                    date: row.flatMap { axHelpDate(in: $0) }
+                    date: row.flatMap { axHelpDate(in: $0) },
+                    nativeSource: observationSources.map { sources in
+                        TranscriptNativeObservation.Source(row: row.map { sources.identity(of: $0) },
+                            body: sources.identity(of: textArea), rowFrame: nil, bodyFrame: nil,
+                            origin: .fallback, ambiguous: row == nil)
+                    }
                 )
             )
         }
@@ -1071,6 +1127,8 @@ struct KakaoTalkTranscriptReader {
             }
         }
 
+        // Flat fallback cannot certify physical multiplicity. Keep its legacy
+        // content-dedup/limit boundary even when source overlap is recorded.
         return Array(deduplicateMessagesPreservingOrder(messages).suffix(limit))
     }
 
@@ -1788,6 +1846,7 @@ private struct RowMetadata {
 private struct MessageBodyCandidate {
     let body: String
     let frame: CGRect?
+    var nativeBody: Int? = nil
 }
 
 private struct GroupTailStamp {
@@ -1809,6 +1868,7 @@ private struct RowAnalysis {
     let axHelpDate: String?
     var sideFailure: String? = nil
     var rightAligned = false
+    var nativeSource: TranscriptNativeObservation.Source? = nil
 
     var imageCount: Int {
         imageFrames.count
@@ -1826,6 +1886,7 @@ private enum MessageSide: String, Hashable {
 }
 
 private final class FrameCache {
+    var observationSources: TranscriptObservationSources?
     private var entries: [(element: AXUIElement, frame: CGRect?)] = []
     private var buckets: [CFHashCode: [Int]] = [:]
 
@@ -1843,5 +1904,24 @@ private final class FrameCache {
         entries.append((element: element.axElement, frame: frame))
         buckets[hash, default: []].append(idx)
         return frame
+    }
+}
+
+/// Identity is valid only during this extraction. CFEqual proves duplicate
+/// exposure without reading any AX attributes. Neither hashes nor ordinals
+/// leave the process or participate in cross-read message identity.
+private final class TranscriptObservationSources {
+    private var elements: [AXUIElement] = []
+    private var buckets: [CFHashCode: [Int]] = [:]
+
+    func identity(of element: UIElement) -> Int {
+        let hash = CFHash(element.axElement)
+        if let indices = buckets[hash] {
+            for index in indices where CFEqual(elements[index], element.axElement) { return index }
+        }
+        let index = elements.count
+        elements.append(element.axElement)
+        buckets[hash, default: []].append(index)
+        return index
     }
 }

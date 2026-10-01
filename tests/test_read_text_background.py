@@ -37,7 +37,7 @@ class ReadTextBackgroundTests(unittest.TestCase):
                 sdk = subprocess.run(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], capture_output=True, text=True)
                 if sdk.returncode == 0:
                     args = ['-sdk', sdk.stdout.strip()]
-            helpers = [ROOT / f'Sources/kmsg/KakaoTalk/{name}.swift' for name in ['TranscriptAuthorEvidence', 'TranscriptRightEdgeAlignment']]
+            helpers = [ROOT / f'Sources/kmsg/KakaoTalk/{name}.swift' for name in ['TranscriptAuthorEvidence', 'TranscriptRightEdgeAlignment', 'TranscriptNativeObservation']]
             build = subprocess.run(['swiftc', *args, *map(str, helpers), str(main), '-o', str(binary)], capture_output=True, text=True)
             self.assertEqual(build.returncode, 0, build.stderr)
             run = subprocess.run([str(binary)], capture_output=True, text=True)
