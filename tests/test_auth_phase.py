@@ -131,13 +131,19 @@ for name in names {
         }
         let auth = Authenticator(enabled: enabled)
         var outcomes: [String] = []
+        var scopeRestored: [Bool] = []
         let mode: AuthenticationMode = name.hasPrefix("prompt") ? .promptForFreshCredentials : .automaticIfNeeded
         for _ in 0..<(name == "repeat" ? 2 : 1) {
+            let parentDiagnostics = AuthReadDiagnostics()
+            let previousDiagnostics = AuthReadDiagnostics.install(parentDiagnostics)
             do { outcomes.append(try auth.run(mode).rawValue) }
             catch { outcomes.append("error") }
+            scopeRestored.append(AuthReadDiagnostics.current === parentDiagnostics)
+            AuthReadDiagnostics.install(previousDiagnostics)
         }
         output.append(["name": name, "enabled": enabled, "trace": trace,
-                       "outcomes": outcomes, "lines": lines, "clockReads": clockReads])
+                       "outcomes": outcomes, "lines": lines, "clockReads": clockReads,
+                       "scopeRestored": scopeRestored])
     }
 }
 print(String(data: try JSONSerialization.data(withJSONObject: output), encoding: .utf8)!)
@@ -152,6 +158,7 @@ class AuthPhaseTests(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         folder = Path(cls.temp.name)
         helper = (ROOT / 'Sources/kmsg/Auth/AuthPhaseDiagnostics.swift').read_text()
+        helper += '\n' + (ROOT / 'Sources/kmsg/Auth/AuthReadDiagnostics.swift').read_text()
         source = (ROOT / 'Sources/kmsg/Auth/KakaoTalkAuthenticator.swift').read_text()
         selected = []
         for name in ['ensureAuthenticated', 'isAuthenticated', 'isLikelyLoginWindow', 'authPhase']:
@@ -185,6 +192,10 @@ class AuthPhaseTests(unittest.TestCase):
                 self.assertEqual(candidate['clockReads'], 0)
                 self.assertEqual(candidate['lines'], [])
 
+    def test_actual_ensure_restores_parent_scope_after_success_failure_and_cache_return(self):
+        for candidate in self.results['candidate']:
+            self.assertTrue(all(candidate['scopeRestored']), (candidate['name'], candidate['enabled']))
+
     def test_numeric_bounded_output_has_no_private_values(self):
         expected = {'total','cache','reopen','state','dismiss','list','main','login','title','markers',
                     'inputs','buttons','password','reset','status','schema','states','checks'}
@@ -192,6 +203,9 @@ class AuthPhaseTests(unittest.TestCase):
             for line in candidate['lines']:
                 self.assertLess(len(line.encode()), 500)
                 self.assertNotIn('PRIVATE', line)
+                if not line.startswith('[kmsg] auth-phase '):
+                    self.assertRegex(line, r'^\[kmsg\] auth-(plan|shape|io) total=')
+                    continue
                 self.assertTrue(line.startswith('[kmsg] auth-phase total='))
                 fields = dict(pair.split('=') for pair in line.split()[2:])
                 self.assertEqual(set(fields), expected)
@@ -202,14 +216,16 @@ class AuthPhaseTests(unittest.TestCase):
     def test_cached_calls_do_not_emit_or_reuse_previous_full_timing(self):
         candidate = {r['name']: r for r in self.results['candidate'] if r['enabled']}
         self.assertEqual(candidate['cache']['lines'], [])
-        self.assertEqual(len(candidate['repeat']['lines']), 1)
+        self.assertEqual(len(candidate['repeat']['lines']), 4)
+        self.assertEqual([line.split()[1] for line in candidate['repeat']['lines']],
+                         ['auth-plan', 'auth-shape', 'auth-io', 'auth-phase'])
         self.assertEqual(candidate['repeat']['outcomes'], ['alreadyAuthenticated', 'alreadyAuthenticated'])
 
     def test_failure_still_emits_and_nested_timing_is_not_reported_as_independent(self):
         candidate = next(r for r in self.results['candidate'] if r['enabled'] and r['name'] == 'store-error')
         self.assertEqual(candidate['outcomes'], ['error'])
-        self.assertEqual(len(candidate['lines']), 1)
-        fields = dict(pair.split('=') for pair in candidate['lines'][0].split()[2:])
+        self.assertEqual(len(candidate['lines']), 4)
+        fields = dict(pair.split('=') for pair in candidate['lines'][-1].split()[2:])
         self.assertGreater(float(fields['total']), float(fields['state']))
         self.assertGreater(float(fields['state']), float(fields['dismiss']))
 

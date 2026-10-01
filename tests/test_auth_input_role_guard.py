@@ -164,6 +164,7 @@ class AuthInputRoleGuardTests(unittest.TestCase):
             ui_methods.append(method)
         template = STUB.replace('// UI_METHODS', '\n'.join(ui_methods))
         phase = (ROOT/'Sources/kmsg/Auth/AuthPhaseDiagnostics.swift').read_text()
+        phase += '\n' + (ROOT/'Sources/kmsg/Auth/AuthReadDiagnostics.swift').read_text()
         cls.results = {}
         for label, auth in [('reference', REFERENCE.read_text()), ('candidate', methods)]:
             p = Path(cls.temp.name)/(label+'.swift')

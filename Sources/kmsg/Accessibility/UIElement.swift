@@ -50,7 +50,10 @@ public final class UIElement: @unchecked Sendable {
     /// Get an attribute value
     public func attribute<T>(_ name: String) throws -> T {
         var value: CFTypeRef?
+        let diagnostics = AuthReadDiagnostics.current
+        let readStarted = diagnostics?.beginRead(.scalar)
         let error = AXUIElementCopyAttributeValue(axElement, name as CFString, &value)
+        if let readStarted { diagnostics?.endRead(readStarted, failed: error != .success) }
         guard error == .success else {
             throw AccessibilityError.axError(error)
         }
@@ -205,13 +208,26 @@ public final class UIElement: @unchecked Sendable {
     /// KakaoTalk transcripts), so batching is the difference between a
     /// sub-second and a 20-second tree walk.
     public func batchAttributes(_ names: [String]) -> [Any?] {
+        batchAttributes(names, diagnoseStructure: false)
+    }
+
+    private func batchAttributes(_ names: [String], diagnoseStructure: Bool) -> [Any?] {
         var values: CFArray?
+        let diagnostics = AuthReadDiagnostics.current
+        let readStarted = diagnostics?.beginRead(.batch)
         let error = AXUIElementCopyMultipleAttributeValues(
             axElement,
             names as CFArray,
             AXCopyMultipleAttributeOptions(),
             &values
         )
+        if let readStarted { diagnostics?.endRead(readStarted, failed: error != .success) }
+        if diagnoseStructure, let diagnostics {
+            let raw = values as? [AnyObject]
+            diagnostics.recordStructure(error: error, raw: raw,
+                roleIsString: raw?.count == 2 && raw?[0] is String,
+                childrenAreElements: raw?.count == 2 && raw?[1] is [AXUIElement])
+        }
         guard error == .success, let raw = values as? [AnyObject], raw.count == names.count else {
             return [Any?](repeating: nil, count: names.count)
         }
@@ -234,9 +250,12 @@ public final class UIElement: @unchecked Sendable {
     /// the uncertain slots through the original scalar API.
     func optionalStringAttributesRead(_ names: [String]) -> (values: [String?], scalarFallbackIndices: [Int]) {
         var values: CFArray?
+        let diagnostics = AuthReadDiagnostics.current
+        let readStarted = diagnostics?.beginRead(.batch)
         let error = AXUIElementCopyMultipleAttributeValues(
             axElement, names as CFArray, AXCopyMultipleAttributeOptions(), &values
         )
+        if let readStarted { diagnostics?.endRead(readStarted, failed: error != .success) }
         guard error == .success, let raw = values as? [AnyObject], raw.count == names.count else {
             return (Array(repeating: nil, count: names.count), Array(names.indices))
         }
@@ -271,7 +290,7 @@ public final class UIElement: @unchecked Sendable {
     /// A nil/error children slot is not evidence of a successful empty array.
     /// Keep the legacy returned values while exposing whether sharing is safe.
     func roleAndChildrenRead() -> (role: String?, children: [UIElement], complete: Bool) {
-        let values = batchAttributes([kAXRoleAttribute, kAXChildrenAttribute])
+        let values = batchAttributes([kAXRoleAttribute, kAXChildrenAttribute], diagnoseStructure: true)
         let role = values[0] as? String
         let rawChildren = values[1] as? [AXUIElement]
         let children = rawChildren?.map { UIElement($0) } ?? []

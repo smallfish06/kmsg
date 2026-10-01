@@ -12,6 +12,7 @@ final class AuthPhaseDiagnostics {
     private var elapsed: [Phase: Double] = [:]
     private var calls: [Phase: Int] = [:]
     var fullCheck = false
+    var totalSeconds: Double { elapsed[.total, default: 0] }
 
     init(now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }) {
         self.now = now
@@ -32,6 +33,9 @@ final class AuthPhaseDiagnostics {
     }
 
     func measure<T>(_ phase: Phase, _ action: () throws -> T) rethrows -> T {
+        let diagnostics = AuthReadDiagnostics.current
+        let previous = diagnostics?.enterPhase(phase.rawValue)
+        defer { if let previous { diagnostics?.restorePhase(previous) } }
         let start = begin()
         defer { end(phase, since: start) }
         return try action()

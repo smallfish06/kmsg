@@ -83,10 +83,19 @@ final class KakaoTalkAuthenticator {
         mode: AuthenticationMode
     ) throws -> AuthenticationOutcome {
         phaseDiagnostics?.reset()
+        let readDiagnostics = phaseDiagnostics == nil ? nil : AuthReadDiagnostics()
+        let previousDiagnostics = AuthReadDiagnostics.install(readDiagnostics)
+        defer { AuthReadDiagnostics.install(previousDiagnostics) }
         let phaseStarted = phaseDiagnostics?.begin()
         defer {
             if let phaseDiagnostics, let phaseStarted {
                 phaseDiagnostics.end(.total, since: phaseStarted)
+                if phaseDiagnostics.fullCheck, let readDiagnostics {
+                    for line in readDiagnostics.lines(total: phaseDiagnostics.totalSeconds) {
+                        if let authDiagnostic { authDiagnostic(line) }
+                        else { try? FileHandle.standardError.write(contentsOf: Data((line + "\n").utf8)) }
+                    }
+                }
                 if let line = phaseDiagnostics.line() {
                     if let authDiagnostic { authDiagnostic(line) }
                     else { try? FileHandle.standardError.write(contentsOf: Data((line + "\n").utf8)) }
@@ -636,6 +645,14 @@ final class KakaoTalkAuthenticator {
             // No read sharing reaches the caller's click, Escape or login.
             scope.discard()
             let counts = scope.counts
+            AuthReadDiagnostics.current?.recordScope(
+                invalid: counts.invalidMask, firstInvalidVisit: counts.firstInvalidVisit,
+                skipMask: counts.skipMask, rejects: counts.rejects,
+                evaluatedPlans: counts.admissionChecks,
+                bestNet: counts.bestNet, bestHits: counts.bestHits,
+                bestNodes: counts.bestNodes, bestGuard: counts.bestGuard,
+                rootMissing: counts.rootMissing, unknownBreaks: counts.unknownBreaks,
+                rootIncomplete: counts.rootIncomplete)
             let numbers: [(String, Double)] = [
                 ("auth.ack", seconds(since: started)), ("auth.ackwalk", walkSeconds),
                 ("auth.ackguard", guardSeconds), ("auth.ackfb", fallbackSeconds),

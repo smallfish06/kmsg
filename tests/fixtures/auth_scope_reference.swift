@@ -1,3 +1,4 @@
+// Frozen b22d9d3 sharing decisions for diagnostics parity.
 import Foundation
 
 /// Read sharing for one read-only traversal group. No value/text, result or
@@ -39,11 +40,6 @@ public final class AXTraversalReadScope {
         var predictedNodes = 0
         var guardAXCost = 0
         var activated = 0
-        // Diagnostic observations include rejected plans and pre-reuse faults.
-        // They do not participate in sharing or validation decisions.
-        var invalidMask = 0, firstInvalidVisit = 0, skipMask = 0, rejects = 0
-        var bestNet = 0, bestHits = 0, bestNodes = 0, bestGuard = 0
-        var rootMissing = 0, unknownBreaks = 0, rootIncomplete = 0
     }
     enum Validation: Int {
         case valid = 0
@@ -62,9 +58,7 @@ public final class AXTraversalReadScope {
     private var entryOrder: [Key] = []
     private var roots: [Key: RootRead] = [:]
     private var rootOrder: [Key] = []
-    private var invalid: Validation? {
-        didSet { if let invalid { noteInvalid(invalid) } }
-    }
+    private var invalid: Validation?
     private var reuseKeys: Set<Key>?
     private(set) var counts = Counts()
 
@@ -81,27 +75,19 @@ public final class AXTraversalReadScope {
         in remainingRoots: ArraySlice<UIElement>, roles: Set<String>,
         roleLimits: [String: Int], maxNodes: Int, guardAXCost: Int
     ) {
-        guard reuseKeys == nil else { counts.skipMask |= 1; return }
-        guard invalid == nil else { counts.skipMask |= 2; return }
-        guard !entries.isEmpty else { counts.skipMask |= 4; return }
-        let diagnostics = AuthReadDiagnostics.current
-        let planStarted = diagnostics?.beginPlan()
-        defer { if let planStarted { diagnostics?.endPlan(since: planStarted) } }
+        guard reuseKeys == nil, invalid == nil, !entries.isEmpty else { return }
         counts.admissionChecks += 1
         var predictedHits = 0
         var keys = Set<Key>()
         for root in remainingRoots {
             let rootKey = Key(element: root)
-            guard let children = roots[rootKey]?.children ?? entries[rootKey]?.children else {
-                counts.rootMissing += 1
-                continue
-            }
+            guard let children = roots[rootKey]?.children ?? entries[rootKey]?.children else { continue }
             var queue = Array(children.prefix(maxNodes))
             var index = 0, saturated = 0
             var matches: [String: Int] = [:]
             while index < queue.count, index < maxNodes, saturated < roles.count {
                 let key = Key(element: queue[index])
-                guard let saved = entries[key] else { counts.unknownBreaks += 1; break }
+                guard let saved = entries[key] else { break }
                 index += 1
                 predictedHits += 1
                 keys.insert(key)
@@ -118,12 +104,7 @@ public final class AXTraversalReadScope {
                 }
             }
         }
-        let net = predictedHits - keys.count
-        if counts.admissionChecks == 1 || net > counts.bestNet {
-            counts.bestNet = net; counts.bestHits = predictedHits
-            counts.bestNodes = keys.count; counts.bestGuard = guardAXCost
-        }
-        guard net > guardAXCost else { counts.rejects += 1; return }
+        guard predictedHits - keys.count > guardAXCost else { return }
         reuseKeys = keys
         counts.predictedHits = predictedHits
         counts.predictedNodes = keys.count
@@ -137,7 +118,6 @@ public final class AXTraversalReadScope {
         let key = Key(element: root)
         guard read.complete else {
             counts.uncertain += 1
-            counts.rootIncomplete += 1
             if entries[key] != nil || roots[key] != nil { invalid = .uncertainRoot }
             // Preserve the original empty-on-error result; never reuse it.
             return read.children
@@ -201,9 +181,8 @@ public final class AXTraversalReadScope {
             guard let saved = entries[key], saved.reused else { continue }
             counts.validationBatches += 1
             let current = saved.element.roleAndChildrenRead()
-            guard current.complete else { noteInvalid(.uncertainStructure); return .uncertainStructure }
+            guard current.complete else { return .uncertainStructure }
             guard current.role == saved.role, Self.sameElements(current.children, saved.children) else {
-                noteInvalid(.changedStructure)
                 return .changedStructure
             }
         }
@@ -211,10 +190,8 @@ public final class AXTraversalReadScope {
             guard let saved = roots[key] else { continue }
             counts.validationRootReads += 1
             let current = saved.element.childrenRead()
-            guard current.complete else { noteInvalid(.uncertainRoot); return .uncertainRoot }
-            guard Self.sameElements(current.children, saved.children) else {
-                noteInvalid(.changedRoot); return .changedRoot
-            }
+            guard current.complete else { return .uncertainRoot }
+            guard Self.sameElements(current.children, saved.children) else { return .changedRoot }
         }
         return .valid
     }
@@ -236,12 +213,6 @@ public final class AXTraversalReadScope {
         }
         childReferences += children
         return true
-    }
-
-    private func noteInvalid(_ reason: Validation) {
-        guard reason != .valid else { return }
-        if counts.invalidMask == 0 { counts.firstInvalidVisit = counts.visited }
-        counts.invalidMask |= 1 << (reason.rawValue - 1)
     }
 
     static func sameElements(_ lhs: [UIElement], _ rhs: [UIElement]) -> Bool {

@@ -137,6 +137,9 @@ public final class UIElement {
             return nil
         }
     }
+    private func batchAttributes(_ names: [String], diagnoseStructure: Bool) -> [Any?] {
+        batchAttributes(names)
+    }
 // UI_METHODS
 }
 // These fake IPCs exercise the production batch classifier, including real
@@ -426,6 +429,7 @@ class AuthAcknowledgementScopeTests(unittest.TestCase):
                            '    public func findAll(role: String, limit: Int']
                 ui_methods = '\n'.join(block(ui, ui.index(needle)) for needle in needles)
                 scope = SCOPE.read_text() + '\n' + DIAGNOSTICS.read_text() + '\n' + TEXT_READER.read_text()
+                scope += '\n' + (ROOT / 'Sources/kmsg/Auth/AuthReadDiagnostics.swift').read_text()
             else:
                 auth_methods = frozen.split('// BEGIN AUTH\n')[1].split('// END AUTH')[0]
                 ui_methods = frozen.split('// BEGIN UI\n')[1].split('// END UI')[0]
