@@ -67,25 +67,40 @@ final class KakaoTalkAuthenticator {
     private let runner: AXActionRunner
     private let authDiagnostic: ((String) -> Void)?
     private var acknowledgementMetrics: [String: Double] = [:]
+    private let phaseDiagnostics: AuthPhaseDiagnostics?
 
     init(kakao: KakaoTalkApp, runner: AXActionRunner, authDiagnostic: ((String) -> Void)? = nil) {
         self.kakao = kakao
         self.runner = runner
         self.authDiagnostic = authDiagnostic
+        self.phaseDiagnostics = authDiagnostic != nil ||
+            ProcessInfo.processInfo.environment["KMSG_READ_TIMING_ENABLED"]?.lowercased() == "true"
+            ? AuthPhaseDiagnostics() : nil
     }
 
     func ensureAuthenticated(
         using store: CredentialStore,
         mode: AuthenticationMode
     ) throws -> AuthenticationOutcome {
-        defer { emitAcknowledgementMetrics() }
+        phaseDiagnostics?.reset()
+        let phaseStarted = phaseDiagnostics?.begin()
+        defer {
+            if let phaseDiagnostics, let phaseStarted {
+                phaseDiagnostics.end(.total, since: phaseStarted)
+                if let line = phaseDiagnostics.line() {
+                    if let authDiagnostic { authDiagnostic(line) }
+                    else { try? FileHandle.standardError.write(contentsOf: Data((line + "\n").utf8)) }
+                }
+            }
+            emitAcknowledgementMetrics()
+        }
         // Fast path: a recent full check concluded logged-in AND a usable
         // window handle is cheaply present right now. The full pipeline below
         // costs seconds of AX round-trips per command on a loaded machine; the
         // session state it verifies changes ~monthly. Window-gone and every
         // command failure invalidate the cache (see command defers), so a
         // stale verdict costs at most one failed command, not a silent stall.
-        if mode == .automaticIfNeeded, AuthVerificationCache.isFresh, kakao.hasUsableWindow {
+        if authPhase(.cache, { mode == .automaticIfNeeded && AuthVerificationCache.isFresh && kakao.hasUsableWindow }) {
             runner.log("auth: fresh verification cache + usable window; skipping full check")
             return .alreadyAuthenticated
         }
@@ -94,9 +109,12 @@ final class KakaoTalkAuthenticator {
         // but left the app running in the background). Activation alone won't reopen it, so
         // an already-authenticated session would be misread as logged-out and fall through to
         // a failing blind keyboard login. Reopen the window once before evaluating auth state.
-        _ = kakao.ensureWindowReopened(timeout: 3.0, trace: { [self] message in
-            runner.log("auth: \(message)")
-        })
+        phaseDiagnostics?.fullCheck = true
+        _ = authPhase(.reopen) {
+            kakao.ensureWindowReopened(timeout: 3.0, trace: { [self] message in
+                runner.log("auth: \(message)")
+            })
+        }
 
         if mode == .promptForFreshCredentials {
             let prompted = try PasswordPrompt.promptForCredentials(defaultIdentifier: store.storedIdentifier())
@@ -267,17 +285,21 @@ final class KakaoTalkAuthenticator {
     }
 
     private func isAuthenticated() -> Bool {
-        if dismissPostLoginAcknowledgementIfPresent() {
+        let phaseStarted = phaseDiagnostics?.begin()
+        defer { if let phaseStarted { phaseDiagnostics?.end(.state, since: phaseStarted) } }
+        if authPhase(.dismiss, { dismissPostLoginAcknowledgementIfPresent() }) {
             return false
         }
 
-        if let chatListWindow = kakao.chatListWindow, !isLikelyLoginWindow(chatListWindow) {
+        if let chatListWindow = authPhase(.list, { kakao.chatListWindow }), !isLikelyLoginWindow(chatListWindow) {
             runner.log("auth: chatListWindow considered authenticated title='\(chatListWindow.title ?? "")'")
             return true
         }
 
-        if let usableWindow = kakao.ensureMainWindow(timeout: 0.6, mode: .fast, trace: { [self] message in
-            self.runner.log("auth: \(message)")
+        if let usableWindow = authPhase(.main, {
+            kakao.ensureMainWindow(timeout: 0.6, mode: .fast, trace: { [self] message in
+                self.runner.log("auth: \(message)")
+            })
         }) {
             let title = usableWindow.title ?? ""
             let loginLike = isLikelyLoginWindow(usableWindow)
@@ -290,13 +312,17 @@ final class KakaoTalkAuthenticator {
             // re-check once before concluding we're logged out; ESC on a real
             // login window is harmless.
             runner.log("auth: login-like window; dismissing possible leftover popover and re-checking")
-            kakao.activate()
-            runner.pressEscapeKey()
-            Thread.sleep(forTimeInterval: 0.2)
-            runner.pressEscapeKey()
-            Thread.sleep(forTimeInterval: 0.3)
-            if let rechecked = kakao.ensureMainWindow(timeout: 0.6, mode: .fast, trace: { [self] message in
-                self.runner.log("auth: \(message)")
+            authPhase(.reset) {
+                kakao.activate()
+                runner.pressEscapeKey()
+                Thread.sleep(forTimeInterval: 0.2)
+                runner.pressEscapeKey()
+                Thread.sleep(forTimeInterval: 0.3)
+            }
+            if let rechecked = authPhase(.main, {
+                kakao.ensureMainWindow(timeout: 0.6, mode: .fast, trace: { [self] message in
+                    self.runner.log("auth: \(message)")
+                })
             }), !isLikelyLoginWindow(rechecked) {
                 runner.log("auth: authenticated after dismissing leftover UI")
                 return true
@@ -464,30 +490,36 @@ final class KakaoTalkAuthenticator {
     }
 
     private func isLikelyLoginWindow(_ window: UIElement) -> Bool {
-        let title = normalizedText(window.title ?? "")
+        let phaseStarted = phaseDiagnostics?.begin()
+        defer { if let phaseStarted { phaseDiagnostics?.end(.login, since: phaseStarted) } }
+        let title = authPhase(.title) { normalizedText(window.title ?? "") }
         if title.contains("login") || title.contains("log in") || title.contains("로그인") {
             return true
         }
 
-        let loginMarkerText = collectLoginMarkerText(from: window)
+        let loginMarkerText = authPhase(.markers) { collectLoginMarkerText(from: window) }
         if containsLoginMarkers(loginMarkerText) {
             return true
         }
 
-        let inputs = window.findAll(where: { element in
-            let role = element.role ?? ""
-            return element.isEnabled && (role == kAXTextFieldRole || role == kAXTextAreaRole || role == "AXSecureTextField")
-        }, limit: 6, maxNodes: 200)
+        let inputs = authPhase(.inputs) {
+            window.findAll(where: { element in
+                let role = element.role ?? ""
+                return element.isEnabled && (role == kAXTextFieldRole || role == kAXTextAreaRole || role == "AXSecureTextField")
+            }, limit: 6, maxNodes: 200)
+        }
         if inputs.count >= 2 {
             return true
         }
 
-        let buttonTitles = window.findAll(role: kAXButtonRole, limit: 10, maxNodes: 200).map { button in
-            normalizedText([
-                button.title,
-                button.axDescription,
-                button.identifier,
-            ].compactMap { $0 }.joined(separator: " "))
+        let buttonTitles = authPhase(.buttons) {
+            window.findAll(role: kAXButtonRole, limit: 10, maxNodes: 200).map { button in
+                normalizedText([
+                    button.title,
+                    button.axDescription,
+                    button.identifier,
+                ].compactMap { $0 }.joined(separator: " "))
+            }
         }
 
         if buttonTitles.contains(where: {
@@ -496,7 +528,12 @@ final class KakaoTalkAuthenticator {
             return true
         }
 
-        return inputs.contains(where: looksLikePasswordField)
+        return authPhase(.password) { inputs.contains(where: looksLikePasswordField) }
+    }
+
+    private func authPhase<T>(_ phase: AuthPhaseDiagnostics.Phase, _ action: () throws -> T) rethrows -> T {
+        guard let phaseDiagnostics else { return try action() }
+        return try phaseDiagnostics.measure(phase, action)
     }
 
     private func resolveSubmitButton(in window: UIElement, near referenceElement: UIElement? = nil) -> UIElement? {
