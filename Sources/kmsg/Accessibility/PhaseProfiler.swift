@@ -18,6 +18,7 @@ import Foundation
 /// would be easier to misread under SIGKILL, where only the marks survive.
 final class PhaseProfiler {
     private let command: String
+    private let phaseMarkerKey: String
     private let startedAt = DispatchTime.now()
     private var slices: [(name: String, seconds: Double)] = []
     private var currentName: String?
@@ -25,8 +26,9 @@ final class PhaseProfiler {
     private var notes: [(key: String, value: String)] = []
     private var summaryEmitted = false
 
-    init(command: String) {
+    init(command: String, phaseMarkerKey: String = "phase") {
         self.command = command
+        self.phaseMarkerKey = phaseMarkerKey
     }
 
     /// Start a new slice, closing the one in progress.
@@ -34,7 +36,7 @@ final class PhaseProfiler {
         endCurrent()
         currentName = name
         currentStart = .now()
-        emit("[kmsg] \(command) phase=\(name) start t=\(format(elapsedTotal))")
+        emit("[kmsg] \(command) \(phaseMarkerKey)=\(name) start t=\(format(elapsedTotal))")
     }
 
     /// Close the slice in progress without starting another.

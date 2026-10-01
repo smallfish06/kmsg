@@ -84,12 +84,21 @@ struct SendImageCommand: ParsableCommand {
     }
 
     func run() throws {
+        // Image phase marks use `step`: the bridge uses text-send `phase`
+        // marks to permit some retries. Observing an image must not change
+        // its existing conservative interrupted-send / no-replay policy.
+        let profiler = PhaseProfiler(command: "send-image", phaseMarkerKey: "step")
+        profiler.note("pid", String(ProcessInfo.processInfo.processIdentifier))
+        var runFailed = true
+        defer { profiler.emitSummary(status: runFailed ? "fail" : "ok") }
+        profiler.begin("permission")
         guard AccessibilityPermission.ensureGranted() else {
             AccessibilityPermission.printInstructions()
             throw ExitCode.failure
         }
 
         let runner = AXActionRunner(traceEnabled: traceAX)
+        profiler.begin("file")
         let imageURL = URL(fileURLWithPath: imagePath)
 
         guard FileManager.default.fileExists(atPath: imagePath) else {
@@ -97,12 +106,14 @@ struct SendImageCommand: ParsableCommand {
             throw ExitCode.failure
         }
 
+        profiler.begin("auth")
         let kakao = try AuthBootstrap.requireAuthenticated(traceAX: traceAX)
         let chatWindowResolver = ChatWindowResolver(
             kakao: kakao,
             runner: runner,
             useCache: !noCache,
-            deepRecoveryEnabled: deepRecovery
+            deepRecoveryEnabled: deepRecovery,
+            note: { key, value in profiler.note(key, value) }
         )
 
         do {
@@ -112,6 +123,7 @@ struct SendImageCommand: ParsableCommand {
             // callers without a registry id, but it opens the FIRST search
             // result for a display name — wrong when two friends share one.
             let resolution: ChatWindowResolution
+            profiler.begin("resolve")
             if let chatID {
                 resolution = try chatWindowResolver.resolve(chatID: chatID)
             } else {
@@ -124,31 +136,36 @@ struct SendImageCommand: ParsableCommand {
             // that draft on the next window open — observed live as a
             // duplicate photo sent minutes later by an unrelated read.
             defer {
-                clearLeftoverDraft(in: resolution.window, runner: runner)
+                clearLeftoverDraft(in: resolution.window, runner: runner, profiler: profiler)
                 closeWindowsIfNeeded(
                     resolution: resolution,
                     kakao: kakao,
                     resolver: chatWindowResolver,
-                    runner: runner
+                    runner: runner,
+                    profiler: profiler
                 )
             }
             // 클립보드에 손대기 전에 확인한다. 붙여넣은 뒤 실패하면 그 첨부가 per-chat
             // 초안으로 남아 다음 창 열기에서 흘러나간다(2026-08-04 중복 사진 사고).
+            profiler.begin("verify")
             try ChatIdentityVerifier(kakao: kakao, runner: runner).verify(
                 window: resolution.window,
                 fallbackChatTitle: recipient ?? chatID ?? "",
                 anchors: expectAnchors,
-                minimumMatches: expectMin
+                minimumMatches: expectMin,
+                note: { key, value in profiler.note(key, value) }
             )
-            try sendImageToWindow(imageURL, window: resolution.window, kakao: kakao, runner: runner)
+            try sendImageToWindow(imageURL, window: resolution.window, kakao: kakao, runner: runner, profiler: profiler)
+            runFailed = false
         } catch {
             print("Failed to send image: \(error)")
             throw ExitCode.failure
         }
     }
 
-    private func sendImageToWindow(_ imageURL: URL, window: UIElement, kakao: KakaoTalkApp, runner: AXActionRunner) throws {
+    private func sendImageToWindow(_ imageURL: URL, window: UIElement, kakao: KakaoTalkApp, runner: AXActionRunner, profiler: PhaseProfiler) throws {
         // 1. Copy image to clipboard
+        profiler.begin("clipboard")
         guard let image = NSImage(contentsOf: imageURL) else {
             throw KakaoTalkError.actionFailed("Failed to load image from \(imageURL.path)")
         }
@@ -160,6 +177,7 @@ struct SendImageCommand: ParsableCommand {
         runner.log("Image copied to clipboard")
 
         // 2. Activate KakaoTalk and focus window
+        profiler.begin("focus")
         kakao.activate()
         try? window.focus()
         Thread.sleep(forTimeInterval: 0.3)
@@ -176,50 +194,72 @@ struct SendImageCommand: ParsableCommand {
         }
 
         // 3. Paste image
+        profiler.begin("paste")
         runner.pressPaste()
         runner.log("Paste command sent")
 
         // 4. Confirmation sheet can be transient or skipped entirely depending on KakaoTalk state.
+        profiler.begin("sheet")
         if let confirmationSheet = waitForConfirmationSheet(in: window, runner: runner) {
+            profiler.note("sheet.found", "1")
             runner.log("Confirmation sheet found")
+            profiler.begin("sheet_settle")
             Thread.sleep(forTimeInterval: 0.2)
 
+            profiler.begin("button")
             guard let button = findSendButton(in: confirmationSheet) else {
+                profiler.note("button.found", "0")
+                profiler.begin("complete")
                 if !waitForSendCompletion(in: window, confirmationSheet: confirmationSheet, runner: runner) {
                     throw KakaoTalkError.elementNotFound("Send button not found on confirmation sheet")
                 }
                 runner.log("send-image: sheet vanished before button lookup; treating as success")
                 print("✓ Image sent to \(targetDescription)")
+                profiler.begin("settle")
                 Thread.sleep(forTimeInterval: 0.5)
                 return
             }
 
-            if !runner.clickWithRetry(button, label: "send button"),
-               !waitForSendCompletion(in: window, confirmationSheet: confirmationSheet, runner: runner)
-            {
-                throw KakaoTalkError.actionFailed("Failed to click send button after retries")
+            profiler.note("button.found", "1")
+            profiler.begin("click")
+            let clicked = runner.clickWithRetry(button, label: "send button")
+            profiler.note("click.ok", clicked ? "1" : "0")
+            if !clicked {
+                profiler.begin("complete")
+                if !waitForSendCompletion(in: window, confirmationSheet: confirmationSheet, runner: runner) {
+                    throw KakaoTalkError.actionFailed("Failed to click send button after retries")
+                }
             }
         } else {
+            profiler.note("sheet.found", "0")
             runner.log("send-image: confirmation sheet not observed; allowing direct-send path")
+            profiler.begin("direct_wait")
             Thread.sleep(forTimeInterval: 0.7)
         }
 
         print("✓ Image sent to \(targetDescription)")
 
         // Give it a moment to finish sending
+        profiler.begin("settle")
         Thread.sleep(forTimeInterval: 0.5)
     }
 
     // Remove anything still sitting in the chat input (and the clipboard copy
     // of the image) before the window closes. KakaoTalk persists a non-empty
     // input as a per-chat draft, and the next window open can send it.
-    private func clearLeftoverDraft(in window: UIElement, runner: AXActionRunner) {
+    private func clearLeftoverDraft(in window: UIElement, runner: AXActionRunner, profiler: PhaseProfiler) {
+        profiler.begin("draft_clipboard")
         NSPasteboard.general.clearContents()
+        profiler.begin("draft_escape")
         runner.pressEscapeKey()
+        profiler.begin("draft_input")
         guard let input = window.findAll(role: kAXTextAreaRole, limit: 4, maxNodes: 200).first else {
+            profiler.note("draft.input", "0")
             runner.log("send-image: no input area found to clear")
             return
         }
+        profiler.note("draft.input", "1")
+        profiler.begin("draft_clear")
         try? input.focus()
         Thread.sleep(forTimeInterval: 0.1)
         runner.pressCommandA()
@@ -231,16 +271,20 @@ struct SendImageCommand: ParsableCommand {
         resolution: ChatWindowResolution,
         kakao: KakaoTalkApp,
         resolver: ChatWindowResolver,
-        runner: AXActionRunner
+        runner: AXActionRunner,
+        profiler: PhaseProfiler
     ) {
         guard !keepWindow else {
+            profiler.note("close.result", "kept")
             runner.log("send-image: keep-window enabled; skipping auto-close")
             return
         }
 
-        if closeChatWindowWithRetry(resolution.window, resolver: resolver, runner: runner) {
+        if closeChatWindowWithRetry(resolution.window, resolver: resolver, runner: runner, profiler: profiler) {
+            profiler.note("close.result", "verified")
             print("✓ Chat window closed.")
         } else {
+            profiler.note("close.result", "unconfirmed")
             // Loud and greppable on stdout: a chat window left open makes
             // KakaoTalk auto-read every incoming message (no unread badge),
             // which blinds the bridge's badge-triggered read loop — observed
@@ -259,19 +303,24 @@ struct SendImageCommand: ParsableCommand {
     private func closeChatWindowWithRetry(
         _ window: UIElement,
         resolver: ChatWindowResolver,
-        runner: AXActionRunner
+        runner: AXActionRunner,
+        profiler: PhaseProfiler
     ) -> Bool {
         for attempt in 1...3 {
+            profiler.begin("close\(attempt)")
             if resolver.closeWindow(window) {
+                profiler.note("close.attempts", String(attempt))
                 if attempt > 1 {
                     runner.log("send-image: chat window closed on attempt \(attempt)")
                 }
                 return true
             }
             runner.log("send-image: close attempt \(attempt) unverified; pressing escape and retrying")
+            profiler.begin("close\(attempt)_escape")
             runner.pressEscapeKey()
             Thread.sleep(forTimeInterval: 0.4)
         }
+        profiler.note("close.attempts", "3")
         return false
     }
 
