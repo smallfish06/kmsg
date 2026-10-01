@@ -56,6 +56,14 @@ final class TranscriptReadCost {
     }
 }
 
+private enum TranscriptChildBonus {
+    static let rowLimit = 20
+    static let textLimit = 20
+    static let rowWeight = 150
+    static let textWeight = 25
+    static let maximum = Double(rowLimit * rowWeight) + Double(textLimit * textWeight)
+}
+
 struct MessageTranscriptContext {
     let inputElement: UIElement
     let chatPaneRoot: UIElement?
@@ -230,9 +238,20 @@ struct MessageContextResolver {
 
         // Phase 2: child bonus via BFS for top 3 candidates only
         let topCount = min(3, phase1.count)
+        // Only skip a strict loser under the same quotas/weights used below.
+        // Preserve tie order and the original loop for any non-finite score.
+        let mayBound = phase1.allSatisfy { $0.score.isFinite }
+        var confirmed: Double? = nil
         for i in 0..<topCount {
             guard phase1[i].score > 0 else { continue }
+            let upper = phase1[i].score + TranscriptChildBonus.maximum
+            if mayBound, let confirmed, confirmed.isFinite, upper.isFinite, upper < confirmed {
+                continue
+            }
             phase1[i].score += scoreTranscriptContainerChildBonus(phase1[i].candidate)
+            if phase1[i].score.isFinite {
+                confirmed = max(confirmed ?? phase1[i].score, phase1[i].score)
+            }
         }
         let scored = phase1.sorted { lhs, rhs in lhs.score > rhs.score }
 
@@ -382,12 +401,12 @@ struct MessageContextResolver {
         let roles: Set<String> = [kAXRowRole, kAXStaticTextRole]
         let found = candidate.findAll(
             roles: roles,
-            roleLimits: [kAXRowRole: 20, kAXStaticTextRole: 20],
+            roleLimits: [kAXRowRole: TranscriptChildBonus.rowLimit, kAXStaticTextRole: TranscriptChildBonus.textLimit],
             maxNodes: 240
         )
         let rowCount = found[kAXRowRole]?.count ?? 0
         let textCount = found[kAXStaticTextRole]?.count ?? 0
-        return Double(rowCount * 150) + Double(textCount * 25)
+        return Double(rowCount * TranscriptChildBonus.rowWeight) + Double(textCount * TranscriptChildBonus.textWeight)
     }
 
     private func isLikelyTranscriptRoot(_ candidate: UIElement, chatWindow: UIElement, inputElement: UIElement) -> Bool {
