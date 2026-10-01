@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -20,6 +21,19 @@ AUTH = ROOT / 'Sources/kmsg/Auth/KakaoTalkAuthenticator.swift'
 UI = ROOT / 'Sources/kmsg/Accessibility/UIElement.swift'
 SCOPE = ROOT / 'Sources/kmsg/Accessibility/AXTraversalReadScope.swift'
 DIAGNOSTICS = ROOT / 'Sources/kmsg/Auth/AuthAcknowledgementDiagnostics.swift'
+
+
+def swiftc_command():
+    command = ['swiftc', '-O']
+    # The standalone Swift toolchain used by CI does not auto-select Xcode's
+    # macOS SDK. Respect an explicit SDKROOT; otherwise resolve it with xcrun.
+    if sys.platform == 'darwin' and not os.environ.get('SDKROOT'):
+        sdk = subprocess.run(['xcrun', '--sdk', 'macosx', '--show-sdk-path'],
+                             check=True, capture_output=True, text=True).stdout.strip()
+        if not sdk:
+            raise AssertionError('xcrun returned an empty macOS SDK path')
+        command += ['-sdk', sdk]
+    return command
 
 
 def block(text, start):
@@ -328,7 +342,7 @@ class AuthAcknowledgementScopeTests(unittest.TestCase):
             path = Path(cls.tmp.name) / ('candidate.swift' if candidate else 'reference.swift')
             path.write_text(source + '\n' + scope + '\n' + CASES)
             binary = path.with_suffix('')
-            result = subprocess.run(['swiftc', '-O', str(path), '-o', str(binary)], capture_output=True, text=True)
+            result = subprocess.run([*swiftc_command(), str(path), '-o', str(binary)], capture_output=True, text=True)
             if result.returncode:
                 raise AssertionError(result.stderr)
             cls.binaries[candidate] = binary
@@ -470,7 +484,7 @@ print(String(data: try JSONSerialization.data(withJSONObject: reports), encoding
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / 'diagnostics.swift'; source.write_text(program)
             binary = Path(folder) / 'diagnostics'
-            subprocess.run(['swiftc', '-O', str(source), '-o', str(binary)], check=True, capture_output=True)
+            subprocess.run([*swiftc_command(), str(source), '-o', str(binary)], check=True, capture_output=True)
             result = json.loads(subprocess.check_output([str(binary)], text=True))
         self.assertEqual(len(result['valid']), 2)
         for line in result['valid']:
