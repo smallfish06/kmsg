@@ -209,9 +209,11 @@ struct KakaoTalkTranscriptReader {
         fallbackChatTitle: String,
         limit: Int,
         includeSystemMessages: Bool = false,
-        chatTitleOverride: String? = nil
+        chatTitleOverride: String? = nil,
+        readPhase: ((String) -> Void)? = nil
     ) throws -> TranscriptSnapshot {
         let referenceDate = Date()
+        readPhase?("context")
         let messageContextResolver = MessageContextResolver(
             kakao: kakao,
             runner: runner,
@@ -228,7 +230,8 @@ struct KakaoTalkTranscriptReader {
             limit: limit,
             includeSystemMessages: includeSystemMessages,
             referenceDate: referenceDate,
-            chatTitleOverride: chatTitleOverride
+            chatTitleOverride: chatTitleOverride,
+            readPhase: readPhase
         )
     }
 
@@ -239,9 +242,10 @@ struct KakaoTalkTranscriptReader {
         limit: Int,
         includeSystemMessages: Bool = false,
         referenceDate: Date = Date(),
-        chatTitleOverride: String? = nil
+        chatTitleOverride: String? = nil,
+        readPhase: ((String) -> Void)? = nil
     ) throws -> TranscriptSnapshot {
-
+        readPhase?("collect")
         let frameCache = FrameCache()
         let collected = collectTranscriptRows(
             from: context.transcriptRoot,
@@ -268,8 +272,10 @@ struct KakaoTalkTranscriptReader {
                     messageLimit: limit,
                     frameCache: cache
                 ).rows
-            }
+            },
+            readPhase: readPhase
         )
+        readPhase?("finalize")
         let displayMessages = extraction.messages
         guard !displayMessages.isEmpty else {
             throw TranscriptReadError.noReadableMessages
@@ -395,7 +401,8 @@ struct KakaoTalkTranscriptReader {
         includeSystemMessages: Bool,
         referenceDate: Date,
         frameCache: FrameCache,
-        recollectRows: (FrameCache) -> [UIElement]
+        recollectRows: (FrameCache) -> [UIElement],
+        readPhase: ((String) -> Void)? = nil
     ) -> (messages: [TranscriptMessage], notes: [(key: String, value: String)]) {
         var notes: [(key: String, value: String)] = []
         // Each row analysis costs ~30ms of AX round-trips, so the floor of 60
@@ -406,6 +413,7 @@ struct KakaoTalkTranscriptReader {
         let rowsToAnalyze = Array(rows.suffix(analysisBudget))
         let fallbackThreshold = max(3, min(limit / 2, 8))
 
+        readPhase?("parse")
         var messages = parseMessages(
             from: rowsToAnalyze,
             transcriptRoot: transcriptRoot,
@@ -433,17 +441,21 @@ struct KakaoTalkTranscriptReader {
         if messages.count < fallbackThreshold, rowsToAnalyze.count > messages.count * 2 {
             runner.log("read: sparse parse (\(messages.count) messages from \(rowsToAnalyze.count) rows); re-collecting rows")
             notes.append((key: "sparse", value: "\(messages.count)/\(rowsToAnalyze.count)"))
+            readPhase?("sparse.wait")
             Thread.sleep(forTimeInterval: 0.35)
             // How many of the rows we hold are childless now — the signature of
             // the rebuild. One `children` call per row, on this path only.
+            readPhase?("sparse.probe")
             let childless = rowsToAnalyze.filter { $0.children.isEmpty }.count
             notes.append((key: "held0", value: "\(childless)/\(rowsToAnalyze.count)"))
+            readPhase?("sparse.collect")
             let freshCache = FrameCache()
             let freshRows = Array(recollectRows(freshCache).suffix(analysisBudget))
             let useFresh = !freshRows.isEmpty
             if useFresh {
                 notes.append((key: "fresh", value: "\(freshRows.count)"))
             }
+            readPhase?("sparse.parse")
             let reparsed = parseMessages(
                 from: useFresh ? freshRows : rowsToAnalyze,
                 transcriptRoot: transcriptRoot,
@@ -462,6 +474,7 @@ struct KakaoTalkTranscriptReader {
         // even when its message count looks healthy. Sparse recovery above
         // never runs in that case. Re-collect under this SAME transcript root with a
         // fresh frame cache, once; no focus change, title search or author guess.
+        readPhase?("attribution")
         let attribution = TranscriptAttributionRecovery.recover(messages, evidence: { message in
             let owner: String?
             if message.authorSource == "unattributed" {
@@ -478,10 +491,13 @@ struct KakaoTalkTranscriptReader {
                 boundsMissing: ["missing-frame", "missing-body-frame"].contains(message.authorUnresolvedReason ?? "")
             )
         }, reread: {
+            readPhase?("attr.wait")
             Thread.sleep(forTimeInterval: 0.35)
+            readPhase?("attr.collect")
             let freshCache = FrameCache()
             let freshRows = Array(recollectRows(freshCache).suffix(analysisBudget))
             guard !freshRows.isEmpty else { return [] }
+            readPhase?("attr.parse")
             return parseMessages(
                 from: freshRows, transcriptRoot: transcriptRoot, limit: limit,
                 includeSystemMessages: includeSystemMessages, referenceDate: referenceDate,
@@ -501,6 +517,7 @@ struct KakaoTalkTranscriptReader {
         }
 
         if messages.isEmpty || messages.count < fallbackThreshold {
+            readPhase?("fallback")
             let fallback = extractFallbackMessages(from: transcriptRoot, limit: limit, referenceDate: referenceDate)
             runner.log("read: fallback messages=\(fallback.count)")
             messages.append(contentsOf: fallback)

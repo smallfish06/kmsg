@@ -35,9 +35,11 @@ struct ChatsCommand: ParsableCommand {
 
         let runner = AXActionRunner(traceEnabled: traceAX)
         let profiler = PhaseProfiler(command: "chats")
+        let detailedTimingEnabled = ProcessInfo.processInfo.environment["KMSG_READ_TIMING_ENABLED"]?.lowercased() == "true"
         defer { profiler.emitSummary(status: "done") }
         profiler.begin("auth")
         let kakao = try AuthBootstrap.requireAuthenticated(traceAX: traceAX)
+        if detailedTimingEnabled { profiler.begin("list") }
         let chatWindowResolver = ChatWindowResolver(kakao: kakao, runner: runner)
 
         // Prefer the chat list window ("카카오톡") over any conversation window.
@@ -110,6 +112,7 @@ struct ChatsCommand: ParsableCommand {
         // (2026-08-09 09:50~10:00 UTC: rows=1 이 153회 연속, 그 10분간 read/send 0건).
         // 아래 재스캔은 이걸 못 고친다. 덜 그려진 목록은 기다리면 채워지지만 필터된
         // 목록은 지워주기 전까지 영원히 그대로다.
+        if detailedTimingEnabled { profiler.begin("search") }
         if chatWindowResolver.clearChatListSearchIfDirty(in: mainWindow) {
             profiler.note("searchcleared", "1")
             Thread.sleep(forTimeInterval: 0.35)

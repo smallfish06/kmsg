@@ -208,12 +208,25 @@ struct ReadCommand: ParsableCommand {
         var snapshot: TranscriptSnapshot
         do {
             snapshot = try profiler.phase("read") {
-                try transcriptReader.readSnapshot(
+                // Keep the original read slice and JSON intact. The separate
+                // stream identifies a blocked inner step even after SIGKILL.
+                // Default-off so other native readers keep their current logs.
+                let readDetail = ProcessInfo.processInfo.environment["KMSG_READ_TIMING_ENABLED"]?.lowercased() == "true"
+                    ? PhaseProfiler(command: "read-detail", phaseMarkerKey: "step") : nil
+                let readPhase: ((String) -> Void)? = readDetail.map { detail in
+                    { name in detail.begin(name) }
+                }
+                var detailSucceeded = false
+                defer { readDetail?.emitSummary(status: detailSucceeded ? "ok" : "fail") }
+                let result = try transcriptReader.readSnapshot(
                     from: window,
                     fallbackChatTitle: resolution.effectiveChatTitle ?? requestedChat,
                     limit: limit,
-                    chatTitleOverride: resolution.chatTitle
+                    chatTitleOverride: resolution.chatTitle,
+                    readPhase: readPhase
                 )
+                detailSucceeded = true
+                return result
             }
             profiler.note("rows", String(snapshot.count))
             // Which path produced them (TranscriptSnapshot.readNotes). Without

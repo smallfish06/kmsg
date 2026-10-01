@@ -61,12 +61,12 @@ let initial = (0..<8).map { row($0, [0, 1, 2, 7].contains($0) ? "unattributed" :
 let resolved = Array(initial.prefix(7)) + [row(7, "explicit")]
 let root = UIElement()
 let rows = Array(repeating: UIElement(), count: 30)
-func run(_ snapshots: [[TranscriptMessage]]) -> (Parser, [TranscriptMessage], [(key: String, value: String)], Int) {
+func run(_ snapshots: [[TranscriptMessage]], readPhase: ((String) -> Void)? = nil) -> (Parser, [TranscriptMessage], [(key: String, value: String)], Int) {
     let parser = Parser(snapshots)
     var recollections = 0
     let result = parser.extractMessages(from: rows, transcriptRoot: root, limit: 10,
         includeSystemMessages: false, referenceDate: Date(), frameCache: FrameCache(),
-        recollectRows: { _ in recollections += 1; return rows })
+        recollectRows: { _ in recollections += 1; return rows }, readPhase: readPhase)
     return (parser, result.messages, result.notes, recollections)
 }
 let recovered = run([initial, resolved])
@@ -109,6 +109,26 @@ check("fresh measured outgoing remains outgoing", run([initial, outgoing]).1 == 
 let sparse = run([Array(resolved.prefix(3)), resolved])
 check("existing sparse recovery preserved", sparse.0.parses == 2 && sparse.1 == resolved)
 check("sparse diagnostics preserved", sparse.2.contains { $0.key == "sparse" })
+// Enabling timing must preserve message acceptance, retry count, and all
+// existing notes on healthy, ambiguous, sparse, and fallback paths.
+for snapshots in [[resolved], [initial, resolved], [initial, initial],
+                  [Array(resolved.prefix(3)), resolved], [[], []]] {
+    let withoutTiming = run(snapshots)
+    var phases: [String] = []
+    let withTiming = run(snapshots, readPhase: { phases.append($0) })
+    check("timing preserves messages", withTiming.1 == withoutTiming.1)
+    check("timing preserves reads", withTiming.0.parses == withoutTiming.0.parses && withTiming.3 == withoutTiming.3)
+    check("timing preserves fallback", withTiming.0.fallbacks == withoutTiming.0.fallbacks)
+    check("timing preserves notes", withTiming.2.map { $0.key + "=" + $0.value } == withoutTiming.2.map { $0.key + "=" + $0.value })
+    check("every parse is timed", phases.first == "parse")
+    if withTiming.0.fallbacks > 0 { check("fallback is visible", phases.last == "fallback") }
+}
+var sparsePhases: [String] = []
+_ = run([Array(resolved.prefix(3)), resolved], readPhase: { sparsePhases.append($0) })
+check("sparse substeps are distinct", sparsePhases == ["parse", "sparse.wait", "sparse.probe", "sparse.collect", "sparse.parse", "attribution"])
+var attributionPhases: [String] = []
+_ = run([initial, resolved], readPhase: { attributionPhases.append($0) })
+check("attribution substeps are distinct", attributionPhases == ["parse", "attribution", "attr.wait", "attr.collect", "attr.parse"])
 let diagnostic = Parser([])
 let missing = diagnostic.inferMessageSide(bodyFrame: nil, imageFrames: [], rowFrame: nil, transcriptRoot: root)
 check("missing frame diagnosed without a sender guess", missing.side == .unknown && missing.failure == "missing-frame")
