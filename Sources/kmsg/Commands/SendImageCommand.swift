@@ -130,20 +130,30 @@ struct SendImageCommand: ParsableCommand {
                 resolution = try chatWindowResolver.resolve(query: recipient ?? "")
             }
 
+            let draftState = ChatWindowCleanup.ImageDraftState(window: resolution.window)
+            let cleanup = ChatWindowCleanup(kakao: kakao, runner: runner)
             // Clear leftovers and close on EVERY exit path. A send whose
             // confirmation click misreports failure can leave the pasted
             // attachment behind as a per-chat draft, and KakaoTalk flushes
             // that draft on the next window open — observed live as a
             // duplicate photo sent minutes later by an unrelated read.
             defer {
-                clearLeftoverDraft(in: resolution.window, runner: runner, profiler: profiler)
-                closeWindowsIfNeeded(
-                    resolution: resolution,
-                    kakao: kakao,
-                    resolver: chatWindowResolver,
-                    runner: runner,
-                    profiler: profiler
-                )
+                clearLeftoverDraft(in: resolution.window, cleanup: cleanup, state: draftState, profiler: profiler)
+                if draftState.identityVerified {
+                    closeWindowsIfNeeded(
+                        resolution: resolution,
+                        kakao: kakao,
+                        resolver: chatWindowResolver,
+                        runner: runner,
+                        profiler: profiler
+                    )
+                } else {
+                    profiler.note("close.result", keepWindow ? "kept" : "unconfirmed")
+                    profiler.note("close.authority", "unverified")
+                    if !keepWindow {
+                        print("⚠ WINDOW_LEFT_OPEN: target identity unverified; cleanup skipped")
+                    }
+                }
             }
             // 클립보드에 손대기 전에 확인한다. 붙여넣은 뒤 실패하면 그 첨부가 per-chat
             // 초안으로 남아 다음 창 열기에서 흘러나간다(2026-08-04 중복 사진 사고).
@@ -155,7 +165,8 @@ struct SendImageCommand: ParsableCommand {
                 minimumMatches: expectMin,
                 note: { key, value in profiler.note(key, value) }
             )
-            try sendImageToWindow(imageURL, window: resolution.window, kakao: kakao, runner: runner, profiler: profiler)
+            draftState.identityVerified = true
+            try sendImageToWindow(imageURL, window: resolution.window, kakao: kakao, runner: runner, profiler: profiler, draftState: draftState)
             runFailed = false
         } catch {
             print("Failed to send image: \(error)")
@@ -163,7 +174,9 @@ struct SendImageCommand: ParsableCommand {
         }
     }
 
-    private func sendImageToWindow(_ imageURL: URL, window: UIElement, kakao: KakaoTalkApp, runner: AXActionRunner, profiler: PhaseProfiler) throws {
+    private func sendImageToWindow(_ imageURL: URL, window: UIElement, kakao: KakaoTalkApp, runner: AXActionRunner, profiler: PhaseProfiler, draftState: ChatWindowCleanup.ImageDraftState) throws {
+        let confirmationDiagnostics = ImageConfirmationDiagnostics.make()
+        defer { confirmationDiagnostics?.emit() }
         // 1. Copy image to clipboard
         profiler.begin("clipboard")
         guard let image = NSImage(contentsOf: imageURL) else {
@@ -172,6 +185,7 @@ struct SendImageCommand: ParsableCommand {
 
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
+        draftState.clipboardPrepared = true
         pasteboard.writeObjects([image])
 
         runner.log("Image copied to clipboard")
@@ -186,6 +200,7 @@ struct SendImageCommand: ParsableCommand {
         // 붙여넣기는 그때 앞에 있는 창(=남의 방)에 들어간다 — 그 뒤의 확인 시트 탐색은
         // `window` 안에서 하므로 시트를 못 보고 "direct-send path" 로 성공 처리된다.
         // 포커스가 그 창이 아니면 여기서 멈춘다.
+        ChatWindowCleanup(kakao: kakao, runner: runner).rememberPasteInput(in: window, state: draftState)
         let focusedNow = kakao.focusedWindow
         guard let focusedNow, CFEqual(focusedNow.axElement, window.axElement) else {
             throw KakaoTalkError.actionFailed(
@@ -195,12 +210,13 @@ struct SendImageCommand: ParsableCommand {
 
         // 3. Paste image
         profiler.begin("paste")
+        draftState.pasteDispatched = true
         runner.pressPaste()
         runner.log("Paste command sent")
 
         // 4. Confirmation sheet can be transient or skipped entirely depending on KakaoTalk state.
         profiler.begin("sheet")
-        if let confirmationSheet = waitForConfirmationSheet(in: window, runner: runner) {
+        if let confirmationSheet = waitForConfirmationSheet(in: window, runner: runner, diagnostics: confirmationDiagnostics) {
             profiler.note("sheet.found", "1")
             runner.log("Confirmation sheet found")
             profiler.begin("sheet_settle")
@@ -210,7 +226,7 @@ struct SendImageCommand: ParsableCommand {
             guard let button = findSendButton(in: confirmationSheet) else {
                 profiler.note("button.found", "0")
                 profiler.begin("complete")
-                if !waitForSendCompletion(in: window, confirmationSheet: confirmationSheet, runner: runner) {
+                if !waitForSendCompletion(in: window, confirmationSheet: confirmationSheet, runner: runner, diagnostics: confirmationDiagnostics) {
                     throw KakaoTalkError.elementNotFound("Send button not found on confirmation sheet")
                 }
                 runner.log("send-image: sheet vanished before button lookup; treating as success")
@@ -226,7 +242,7 @@ struct SendImageCommand: ParsableCommand {
             profiler.note("click.ok", clicked ? "1" : "0")
             if !clicked {
                 profiler.begin("complete")
-                if !waitForSendCompletion(in: window, confirmationSheet: confirmationSheet, runner: runner) {
+                if !waitForSendCompletion(in: window, confirmationSheet: confirmationSheet, runner: runner, diagnostics: confirmationDiagnostics) {
                     throw KakaoTalkError.actionFailed("Failed to click send button after retries")
                 }
             }
@@ -247,24 +263,16 @@ struct SendImageCommand: ParsableCommand {
     // Remove anything still sitting in the chat input (and the clipboard copy
     // of the image) before the window closes. KakaoTalk persists a non-empty
     // input as a per-chat draft, and the next window open can send it.
-    private func clearLeftoverDraft(in window: UIElement, runner: AXActionRunner, profiler: PhaseProfiler) {
-        profiler.begin("draft_clipboard")
-        NSPasteboard.general.clearContents()
-        profiler.begin("draft_escape")
-        runner.pressEscapeKey()
-        profiler.begin("draft_input")
-        guard let input = window.findAll(role: kAXTextAreaRole, limit: 4, maxNodes: 200).first else {
-            profiler.note("draft.input", "0")
-            runner.log("send-image: no input area found to clear")
-            return
-        }
-        profiler.note("draft.input", "1")
-        profiler.begin("draft_clear")
-        try? input.focus()
-        Thread.sleep(forTimeInterval: 0.1)
-        runner.pressCommandA()
-        runner.pressDeleteKey()
-        runner.log("send-image: cleared input draft and clipboard")
+    private func clearLeftoverDraft(
+        in window: UIElement,
+        cleanup: ChatWindowCleanup,
+        state: ChatWindowCleanup.ImageDraftState,
+        profiler: PhaseProfiler
+    ) {
+        let result = cleanup.clearImageDraft(in: window, state: state, allowWindowClose: !keepWindow, profiler: profiler)
+        profiler.note("draft.result", result.rawValue)
+        // Text emptiness cannot certify the attachment or delivery state.
+        profiler.note("draft.attachment", "unverified")
     }
 
     private func closeWindowsIfNeeded(
@@ -306,38 +314,47 @@ struct SendImageCommand: ParsableCommand {
         runner: AXActionRunner,
         profiler: PhaseProfiler
     ) -> Bool {
-        for attempt in 1...3 {
-            profiler.begin("close\(attempt)")
-            if resolver.closeWindow(window) {
-                profiler.note("close.attempts", String(attempt))
-                if attempt > 1 {
-                    runner.log("send-image: chat window closed on attempt \(attempt)")
-                }
-                return true
-            }
-            runner.log("send-image: close attempt \(attempt) unverified; pressing escape and retrying")
-            profiler.begin("close\(attempt)_escape")
-            runner.pressEscapeKey()
-            Thread.sleep(forTimeInterval: 0.4)
-        }
-        profiler.note("close.attempts", "3")
-        return false
+        ChatWindowCleanup(kakao: resolver.cleanupApplication, runner: runner).closeWithRetry(
+            window,
+            close: { resolver.closeWindow($0) },
+            beforeAttempt: { profiler.begin("close\($0)") },
+            note: { profiler.note($0, $1) }
+        )
     }
 
-    private func waitForConfirmationSheet(in window: UIElement, runner: AXActionRunner) -> UIElement? {
+    private func waitForConfirmationSheet(
+        in window: UIElement, runner: AXActionRunner, diagnostics: ImageConfirmationDiagnostics? = nil
+    ) -> UIElement? {
         var sheet: UIElement?
         _ = runner.waitUntil(label: "confirmation sheet", timeout: 1.5, pollInterval: 0.1) {
-            sheet = locateConfirmationSheet(in: window)
+            sheet = locateConfirmationSheet(in: window, diagnostics: diagnostics)
             return sheet != nil
         }
         return sheet
     }
 
-    private func locateConfirmationSheet(in window: UIElement) -> UIElement? {
-        if let found = window.attributeOptional(kAXSheetsAttribute).flatMap({ (elements: [AXUIElement]) in elements.first }) {
-            return UIElement(found)
+    private func locateConfirmationSheet(in window: UIElement, diagnostics: ImageConfirmationDiagnostics? = nil) -> UIElement? {
+        let started = diagnostics?.beginLookup()
+        defer { if let started { diagnostics?.endLookup(started) } }
+        let elements: [AXUIElement]? = window.attributeOptional(kAXSheetsAttribute)
+        if let elements {
+            if let found = elements.first {
+                diagnostics?.directPresent += 1
+                return UIElement(found)
+            }
+            diagnostics?.directEmpty += 1
+        } else {
+            diagnostics?.directUnknown += 1
         }
-        return window.findFirst(where: { $0.role == kAXSheetRole })
+        diagnostics?.fallbackWalks += 1
+        let found = window.findFirst(where: {
+            let role = $0.role
+            diagnostics?.fallbackVisits += 1
+            if role == nil { diagnostics?.fallbackUnknownRoles += 1 }
+            return role == kAXSheetRole
+        })
+        if found != nil { diagnostics?.fallbackFound += 1 }
+        return found
     }
 
     private func findSendButton(in confirmationSheet: UIElement) -> UIElement? {
@@ -350,17 +367,26 @@ struct SendImageCommand: ParsableCommand {
     private func waitForSendCompletion(
         in window: UIElement,
         confirmationSheet: UIElement,
-        runner: AXActionRunner
+        runner: AXActionRunner,
+        diagnostics: ImageConfirmationDiagnostics? = nil
     ) -> Bool {
         runner.waitUntil(label: "send-image completion", timeout: 1.5, pollInterval: 0.1) {
-            locateConfirmationSheet(in: window) == nil || !windowContainsElement(window, target: confirmationSheet)
+            locateConfirmationSheet(in: window, diagnostics: diagnostics) == nil ||
+                !windowContainsElement(window, target: confirmationSheet, diagnostics: diagnostics)
         }
     }
 
-    private func windowContainsElement(_ window: UIElement, target: UIElement) -> Bool {
-        window.findFirst(where: { candidate in
-            areSameAXElement(candidate, target)
+    private func windowContainsElement(
+        _ window: UIElement, target: UIElement, diagnostics: ImageConfirmationDiagnostics? = nil
+    ) -> Bool {
+        let started = diagnostics?.beginContains()
+        defer { if let started { diagnostics?.endContains(started) } }
+        let found = window.findFirst(where: { candidate in
+            diagnostics?.containsVisits += 1
+            return areSameAXElement(candidate, target)
         }) != nil
+        if found { diagnostics?.containsFound += 1 }
+        return found
     }
 
     private func areSameAXElement(_ lhs: UIElement, _ rhs: UIElement) -> Bool {

@@ -408,18 +408,9 @@ struct SendCommand: ParsableCommand {
         resolver: ChatWindowResolver,
         runner: AXActionRunner
     ) -> Bool {
-        for attempt in 1...3 {
-            if resolver.closeWindow(window) {
-                if attempt > 1 {
-                    runner.log("send: chat window closed on attempt \(attempt)")
-                }
-                return true
-            }
-            runner.log("send: close attempt \(attempt) unverified; pressing escape and retrying")
-            runner.pressEscapeKey()
-            Thread.sleep(forTimeInterval: 0.4)
-        }
-        return false
+        ChatWindowCleanup(kakao: resolver.cleanupApplication, runner: runner).closeWithRetry(
+            window, close: { resolver.closeWindow($0) }
+        )
     }
 
     private func resolveMessageInputField(chatWindow: UIElement, kakao: KakaoTalkApp, runner: AXActionRunner) -> UIElement? {

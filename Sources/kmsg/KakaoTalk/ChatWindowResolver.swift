@@ -287,10 +287,23 @@ struct ChatWindowResolver {
         return ChatWindowResolution(window: chatWindow, method: .openedViaSearch)
     }
 
+    var cleanupApplication: KakaoTalkApp { kakao }
+
+    /// Report the verified close route without assigning keys to another window.
     @discardableResult
-    /// 닫은 경로를 요약 줄에 남긴다(`close.via=axclose|button|cmdw|none`). 브릿지는 --trace-ax 없이
-    /// 돌아서 이게 없으면 "느린 닫기"가 어느 경로였는지 프로덕션에서 알 길이 없다.
     func closeWindow(_ window: UIElement) -> Bool {
+        let cleanup = ChatWindowCleanup(kakao: kakao, runner: runner)
+        let state = cleanup.presence(of: window)
+        note("close.state", state.rawValue)
+        if state == .absent {
+            note("close.via", "none")
+            return true
+        }
+        guard state == .present else {
+            note("close.via", "none")
+            note("close.cmdw", "skipped")
+            return false
+        }
         let closeAction = "AXClose"
 
         kakao.activate()
@@ -330,6 +343,11 @@ struct ChatWindowResolver {
         // WINDOW_LEFT_OPEN 표식).
         guard let focused = kakao.focusedWindow, areSameAXElement(focused, window) else {
             runner.log("close window: cmd+w skipped — the focused window is not the one being closed")
+            note("close.via", "none")
+            note("close.cmdw", "skipped")
+            return false
+        }
+        guard cleanup.canSendWindowKey(to: window) else {
             note("close.via", "none")
             note("close.cmdw", "skipped")
             return false
@@ -2093,9 +2111,7 @@ struct ChatWindowResolver {
 
     private func waitForWindowClosed(_ window: UIElement, label: String) -> Bool {
         runner.waitUntil(label: label, timeout: 0.9, pollInterval: 0.06, evaluateAfterTimeout: false) {
-            !kakao.windows.contains { candidate in
-                areSameAXElement(candidate, window)
-            }
+            ChatWindowCleanup(kakao: kakao, runner: runner).presence(of: window) == .absent
         }
     }
 
