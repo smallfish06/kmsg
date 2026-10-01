@@ -52,8 +52,12 @@ public final class UIElement: @unchecked Sendable {
         var value: CFTypeRef?
         let diagnostics = AuthReadDiagnostics.current
         let readStarted = diagnostics?.beginRead(.scalar)
+        let searchDiagnostics = SearchDiscoveryDiagnostics.currentPass
+        let searchStarted = searchDiagnostics?.beginRead()
         let error = AXUIElementCopyAttributeValue(axElement, name as CFString, &value)
+        if let searchStarted { searchDiagnostics?.endRead(searchStarted, batch: false, error: error) }
         if let readStarted { diagnostics?.endRead(readStarted, failed: error != .success) }
+        searchDiagnostics?.recordScalar(element: axElement, name: name, error: error, raw: value)
         guard error == .success else {
             throw AccessibilityError.axError(error)
         }
@@ -217,13 +221,19 @@ public final class UIElement: @unchecked Sendable {
         var values: CFArray?
         let diagnostics = AuthReadDiagnostics.current
         let readStarted = diagnostics?.beginRead(.batch)
+        let searchDiagnostics = SearchDiscoveryDiagnostics.currentPass
+        let searchStarted = searchDiagnostics?.beginRead()
         let error = AXUIElementCopyMultipleAttributeValues(
             axElement,
             names as CFArray,
             AXCopyMultipleAttributeOptions(),
             &values
         )
+        if let searchStarted { searchDiagnostics?.endRead(searchStarted, batch: true, error: error) }
         if let readStarted { diagnostics?.endRead(readStarted, failed: error != .success) }
+        if diagnoseStructure {
+            searchDiagnostics?.recordStructure(element: axElement, error: error, raw: values as? [AnyObject])
+        }
         if diagnoseStructure, let diagnostics {
             let raw = values as? [AnyObject]
             diagnostics.recordStructure(error: error, raw: raw,

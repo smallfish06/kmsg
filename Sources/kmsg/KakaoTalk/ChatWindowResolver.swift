@@ -1121,6 +1121,8 @@ struct ChatWindowResolver {
     /// 이미 화면에 있는 검색창만 찾는다. 부작용이 없어서 매 tick 도는 경로에서도
     /// 부를 수 있다 — 아래 locateSearchField 는 못 찾으면 검색 버튼들을 눌러본다.
     private func findExistingSearchField(in rootWindow: UIElement) -> UIElement? {
+        let diagnostics = SearchDiscoveryDiagnostics.make()
+        defer { diagnostics?.emit() }
         if let cachedSearchField = resolveCachedElement(
             slot: .searchField,
             root: rootWindow,
@@ -1128,10 +1130,12 @@ struct ChatWindowResolver {
                 field.isEnabled && field.role == kAXTextFieldRole
             }
         ) {
+            diagnostics?.recordCache(hit: true)
             return cachedSearchField
         }
 
-        let initialFields = discoverSearchFieldCandidates(in: rootWindow)
+        diagnostics?.recordCache(hit: false)
+        let initialFields = discoverSearchFieldCandidates(in: rootWindow, diagnostics: diagnostics)
         if let field = pickSearchField(from: initialFields) {
             rememberCachedElement(slot: .searchField, root: rootWindow, element: field)
             return field
@@ -1180,16 +1184,30 @@ struct ChatWindowResolver {
         return nil
     }
 
-    private func discoverSearchFieldCandidates(in rootWindow: UIElement) -> [UIElement] {
+    private func discoverSearchFieldCandidates(
+        in rootWindow: UIElement, diagnostics suppliedDiagnostics: SearchDiscoveryDiagnostics? = nil
+    ) -> [UIElement] {
+        let diagnostics = suppliedDiagnostics ?? SearchDiscoveryDiagnostics.make()
+        defer { if suppliedDiagnostics == nil { diagnostics?.emit() } }
+        func scan(_ window: UIElement, slot: Int) -> [UIElement] {
+            if let diagnostics {
+                return diagnostics.scan(slot: slot, root: window) {
+                    window.findAll(role: kAXTextFieldRole, limit: 8, maxNodes: 140)
+                }
+            }
+            return window.findAll(role: kAXTextFieldRole, limit: 8, maxNodes: 140)
+        }
         var fields: [UIElement] = []
-        fields.append(contentsOf: rootWindow.findAll(role: kAXTextFieldRole, limit: 8, maxNodes: 140))
+        fields.append(contentsOf: scan(rootWindow, slot: 0))
         if let focusedWindow = kakao.focusedWindow {
-            fields.append(contentsOf: focusedWindow.findAll(role: kAXTextFieldRole, limit: 8, maxNodes: 140))
+            fields.append(contentsOf: scan(focusedWindow, slot: 1))
         }
         if let mainWindow = kakao.mainWindow {
-            fields.append(contentsOf: mainWindow.findAll(role: kAXTextFieldRole, limit: 8, maxNodes: 140))
+            fields.append(contentsOf: scan(mainWindow, slot: 2))
         }
-        return fields.filter { $0.isEnabled }
+        let enabled = fields.filter { $0.isEnabled }
+        diagnostics?.recordCandidates(raw: fields.count, enabled: enabled.count)
+        return enabled
     }
 
     private func waitForMatchingSearchResults(query: String, rootWindow: UIElement) -> [SearchCandidate] {

@@ -259,6 +259,7 @@ class AuthReadDiagnosticsTests(unittest.TestCase):
             source = READ.read_text() + '\n' + PHASE.read_text() + '\n' + scope + '\n' + STUB
             if candidate:
                 source += '\n' + (ROOT / 'Sources/kmsg/Accessibility/AuthShadowPlanner.swift').read_text()
+                source += '\n' + (ROOT / 'Sources/kmsg/KakaoTalk/SearchDiscoveryDiagnostics.swift').read_text()
             source = source.replace('// READ_STRUCTURE',
                 'let result = element.roleAndChildrenRead(observeAbsence: enabled ? { observedAbsence = $0 } : nil)'
                 if candidate else 'let result = element.roleAndChildrenRead()')
