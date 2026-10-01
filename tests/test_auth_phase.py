@@ -78,6 +78,17 @@ final class CredentialStore {
     }
     func save(identifier: String, password: String) throws { trace.append("store.save") }
 }
+// This state/phase fixture models field discovery as a supplied field list.
+// The real fresh-pair BFS is exercised by test_auth_input_traversal.py.
+enum AuthInputTraversal {
+    static func find(in root: UIElement, limit: Int, maxNodes: Int) -> [UIElement] {
+        root.findAll(where: { element in
+            let role = element.role ?? ""
+            guard role == kAXTextFieldRole || role == kAXTextAreaRole || role == "AXSecureTextField" else { return false }
+            return element.isEnabled
+        }, limit: limit, maxNodes: maxNodes)
+    }
+}
 enum PasswordPrompt {
     static func promptForCredentials(defaultIdentifier: String?) throws -> DecryptedCredentials {
         trace.append("prompt"); return DecryptedCredentials()

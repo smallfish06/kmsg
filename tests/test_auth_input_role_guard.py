@@ -63,6 +63,13 @@ final class UIElement {
         event(axElement, "batch"); return (axElement.rawRole as? String,
             axElement.badChildren ? [] : axElement.children.map(UIElement.init))
     }
+    func roleAndChildrenRead() -> (role: String?, children: [UIElement], complete: Bool) {
+        axElement.roleReads += 1; axElement.beforeRole?(axElement)
+        let role = axElement.rawRole as? String
+        event(axElement, "input-pair", role ?? "nil")
+        return (role, axElement.badChildren ? [] : axElement.children.map(UIElement.init),
+                role != nil && !axElement.badChildren)
+    }
 // UI_METHODS
 }
 private struct LoginForm {
@@ -165,10 +172,14 @@ class AuthInputRoleGuardTests(unittest.TestCase):
         template = STUB.replace('// UI_METHODS', '\n'.join(ui_methods))
         phase = (ROOT/'Sources/kmsg/Auth/AuthPhaseDiagnostics.swift').read_text()
         phase += '\n' + (ROOT/'Sources/kmsg/Auth/AuthReadDiagnostics.swift').read_text()
+        helper = (ROOT/'Sources/kmsg/Auth/AuthInputTraversal.swift').read_text()
+        helper = helper.replace('        var results:', '        let walk = walks.count\n        walks.append([])\n        var results:')
+        helper = helper.replace('            let current = queue[index]',
+            '            let current = queue[index]\n            walks[walk].append(current.axElement.id)')
         cls.results = {}
         for label, auth in [('reference', REFERENCE.read_text()), ('candidate', methods)]:
             p = Path(cls.temp.name)/(label+'.swift')
-            p.write_text(phase + template.replace('// AUTH_METHODS', auth) + CASES)
+            p.write_text(phase + template.replace('// AUTH_METHODS', auth) + helper + CASES)
             binary = p.with_suffix('')
             build = subprocess.run([*swiftc_command(), str(p), '-o', str(binary)], capture_output=True, text=True)
             if build.returncode: raise AssertionError(build.stderr)
@@ -189,8 +200,13 @@ class AuthInputRoleGuardTests(unittest.TestCase):
                 self.assertEqual(c['walks'], a['walks'])
 
     def test_only_unused_enabled_reads_are_removed(self):
+        # The final form still uses scalar role-first traversal. The classifier
+        # now has separate actual-source pair traversal tests and is not
+        # expected to reproduce the scalar IPC sequence.
         reference = {self.key(r): r for r in self.results['reference']}
         for c in self.results['candidate']:
+            if c['mode'] != 'form':
+                continue
             a = reference[self.key(c)]
             roles, expected = {}, []
             for event in a['events']:
@@ -206,12 +222,13 @@ class AuthInputRoleGuardTests(unittest.TestCase):
         for mode, budget in [('classify',200),('form',240)]:
             key = ('negative200',mode,True)
             a,b = (by_variant[v][key] for v in ['reference','candidate'])
-            self.assertEqual(len(a['events'])-len(b['events']), budget)
+            saved = budget if mode == 'form' else 2*budget-1
+            self.assertEqual(len(a['events'])-len(b['events']), saved)
             self.assertEqual(len(b['walks'][0]), budget)
-            self.assertEqual(a['syntheticAXms']-b['syntheticAXms'], budget*5)
+            self.assertEqual(a['syntheticAXms']-b['syntheticAXms'], saved*5)
             if mode == 'classify':
                 fields = [dict(pair.split('=') for pair in r['phase'].split()[2:]) for r in [a,b]]
-                self.assertAlmostEqual(float(fields[0]['inputs'])-float(fields[1]['inputs']), budget*.005)
+                self.assertAlmostEqual(float(fields[0]['inputs'])-float(fields[1]['inputs']), saved*.005)
 
     def test_quotas_errors_and_timing_off_keep_contract(self):
         for c in self.results['candidate']:

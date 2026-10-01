@@ -513,11 +513,7 @@ final class KakaoTalkAuthenticator {
         }
 
         let inputs = authPhase(.inputs) {
-            window.findAll(where: { element in
-                let role = element.role ?? ""
-                guard role == kAXTextFieldRole || role == kAXTextAreaRole || role == "AXSecureTextField" else { return false }
-                return element.isEnabled
-            }, limit: 6, maxNodes: 200)
+            AuthInputTraversal.find(in: window, limit: 6, maxNodes: 200)
         }
         if inputs.count >= 2 {
             return true
