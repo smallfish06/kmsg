@@ -449,7 +449,8 @@ final class KakaoTalkAuthenticator {
     private func buildLoginForm(from window: UIElement) -> LoginForm? {
         let inputFields = window.findAll(where: { element in
             let role = element.role ?? ""
-            return element.isEnabled && (role == kAXTextFieldRole || role == kAXTextAreaRole || role == "AXSecureTextField")
+            guard role == kAXTextFieldRole || role == kAXTextAreaRole || role == "AXSecureTextField" else { return false }
+            return element.isEnabled
         }, limit: 8, maxNodes: 240)
 
         guard inputFields.count >= 2 else { return nil }
@@ -505,7 +506,8 @@ final class KakaoTalkAuthenticator {
         let inputs = authPhase(.inputs) {
             window.findAll(where: { element in
                 let role = element.role ?? ""
-                return element.isEnabled && (role == kAXTextFieldRole || role == kAXTextAreaRole || role == "AXSecureTextField")
+                guard role == kAXTextFieldRole || role == kAXTextAreaRole || role == "AXSecureTextField" else { return false }
+                return element.isEnabled
             }, limit: 6, maxNodes: 200)
         }
         if inputs.count >= 2 {
