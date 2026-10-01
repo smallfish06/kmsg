@@ -232,10 +232,23 @@ public final class UIElement: @unchecked Sendable {
     /// Role and children in one round-trip — the two attributes every
     /// breadth-first traversal needs at each visited node.
     public func roleAndChildren() -> (role: String?, children: [UIElement]) {
+        let read = roleAndChildrenRead()
+        return (read.role, read.children)
+    }
+
+    /// A nil/error children slot is not evidence of a successful empty array.
+    /// Keep the legacy returned values while exposing whether sharing is safe.
+    func roleAndChildrenRead() -> (role: String?, children: [UIElement], complete: Bool) {
         let values = batchAttributes([kAXRoleAttribute, kAXChildrenAttribute])
         let role = values[0] as? String
-        let children = (values[1] as? [AXUIElement])?.map { UIElement($0) } ?? []
-        return (role, children)
+        let rawChildren = values[1] as? [AXUIElement]
+        let children = rawChildren?.map { UIElement($0) } ?? []
+        return (role, children, role != nil && rawChildren != nil)
+    }
+
+    func childrenRead() -> (children: [UIElement], complete: Bool) {
+        let raw: [AXUIElement]? = attributeOptional(kAXChildrenAttribute)
+        return (raw?.map { UIElement($0) } ?? [], raw != nil)
     }
 
     /// AXValue and AXHelp in one round-trip. Transcript row analysis reads
@@ -436,14 +449,15 @@ public final class UIElement: @unchecked Sendable {
     public func findAll(
         roles: Set<String>,
         roleLimits: [String: Int] = [:],
-        maxNodes: Int = 500
+        maxNodes: Int = 500,
+        readScope: AXTraversalReadScope? = nil
     ) -> [String: [UIElement]] {
         var results: [String: [UIElement]] = [:]
         for role in roles { results[role] = [] }
 
         var saturated = 0
         let totalRoles = roles.count
-        var queue = children
+        var queue = readScope?.children(atRoot: self) ?? children
         var index = 0
         var visited = 0
 
@@ -452,7 +466,7 @@ public final class UIElement: @unchecked Sendable {
             index += 1
             visited += 1
 
-            let (currentRole, children) = current.roleAndChildren()
+            let (currentRole, children) = readScope?.roleAndChildren(of: current) ?? current.roleAndChildren()
             if let role = currentRole, roles.contains(role) {
                 let limit = roleLimits[role] ?? .max
                 if results[role]!.count < limit {

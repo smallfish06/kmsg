@@ -43,19 +43,42 @@ private struct PostLoginAcknowledgement {
     let message: String
 }
 
+private struct PostLoginAcknowledgementRoots {
+    let roots: [UIElement]
+    let anchors: [UIElement?]
+    let windows: [UIElement]
+
+    func matches(_ other: PostLoginAcknowledgementRoots) -> Bool {
+        guard AXTraversalReadScope.sameElements(roots, other.roots),
+              AXTraversalReadScope.sameElements(windows, other.windows),
+              anchors.count == other.anchors.count else { return false }
+        return zip(anchors, other.anchors).allSatisfy { lhs, rhs in
+            switch (lhs, rhs) {
+            case (nil, nil): return true
+            case let (lhs?, rhs?): return CFEqual(lhs.axElement, rhs.axElement)
+            default: return false
+            }
+        }
+    }
+}
+
 final class KakaoTalkAuthenticator {
     private let kakao: KakaoTalkApp
     private let runner: AXActionRunner
+    private let authDiagnostic: ((String) -> Void)?
+    private var acknowledgementMetrics: [String: Double] = [:]
 
-    init(kakao: KakaoTalkApp, runner: AXActionRunner) {
+    init(kakao: KakaoTalkApp, runner: AXActionRunner, authDiagnostic: ((String) -> Void)? = nil) {
         self.kakao = kakao
         self.runner = runner
+        self.authDiagnostic = authDiagnostic
     }
 
     func ensureAuthenticated(
         using store: CredentialStore,
         mode: AuthenticationMode
     ) throws -> AuthenticationOutcome {
+        defer { emitAcknowledgementMetrics() }
         // Fast path: a recent full check concluded logged-in AND a usable
         // window handle is cheaply present right now. The full pipeline below
         // costs seconds of AX round-trips per command on a loaded machine; the
@@ -563,36 +586,121 @@ final class KakaoTalkAuthenticator {
     }
 
     private func resolvePostLoginAcknowledgement() -> PostLoginAcknowledgement? {
-        for root in collectPostLoginAcknowledgementRoots() {
-            guard let acknowledgement = resolvePostLoginAcknowledgement(in: root) else {
-                continue
+        let started = DispatchTime.now()
+        let scope = AXTraversalReadScope()
+        var walkSeconds = 0.0, guardSeconds = 0.0, fallbackSeconds = 0.0
+        var fallbackReason = 0
+        let roots = collectPostLoginAcknowledgementRoots()
+        defer {
+            // No read sharing reaches the caller's click, Escape or login.
+            scope.discard()
+            let counts = scope.counts
+            let numbers: [(String, Double)] = [
+                ("auth.ack", seconds(since: started)), ("auth.ackwalk", walkSeconds),
+                ("auth.ackguard", guardSeconds), ("auth.ackfb", fallbackSeconds),
+                ("auth.ackruns", 1), ("auth.ackroots", Double(roots.roots.count)),
+                ("auth.ackhits", Double(counts.hits)), ("auth.acknodes", Double(counts.distinct)),
+                ("auth.ackreused", Double(counts.reused)), ("auth.acklive", Double(counts.liveBatches)),
+                ("auth.ackvbatch", Double(counts.validationBatches)),
+                ("auth.ackrread", Double(counts.rootReads)),
+                ("auth.ackvrread", Double(counts.validationRootReads)),
+                ("auth.ackunknown", Double(counts.uncertain)),
+                ("auth.ackplans", Double(counts.admissionChecks)),
+                ("auth.ackcredit", Double(counts.predictedHits)),
+                ("auth.ackplanodes", Double(counts.predictedNodes)),
+                ("auth.ackguardmax", Double(counts.guardAXCost)),
+                ("auth.ackactive", Double(counts.activated)),
+                ("auth.ackfallbacks", fallbackReason == 0 ? 0 : 1),
+            ]
+            for (key, value) in numbers { acknowledgementMetrics[key, default: 0] += value }
+            let previous = Int(acknowledgementMetrics["auth.ackreason"] ?? 0)
+            acknowledgementMetrics["auth.ackreason"] = Double(previous | fallbackReason)
+        }
+
+        func fallback(reason: Int) -> PostLoginAcknowledgement? {
+            fallbackReason = reason
+            scope.discard()
+            let fallbackStarted = DispatchTime.now()
+            defer { fallbackSeconds = seconds(since: fallbackStarted) }
+            return resolvePostLoginAcknowledgement(in: collectPostLoginAcknowledgementRoots().roots)
+        }
+
+        let walkStarted = DispatchTime.now()
+        let candidate = resolvePostLoginAcknowledgement(in: roots.roots, readScope: scope)
+        walkSeconds = seconds(since: walkStarted)
+        // With no reused values this was exactly the original AX read path.
+        // A positive first-root result also needs no repeat selection.
+        if scope.counts.hits == 0 { return candidate }
+
+        // A positive shared candidate needs no expensive structural guard.
+        // Discard sharing and select with fresh roots/text before any click.
+        if candidate != nil { return fallback(reason: 1) }
+
+        let guardStarted = DispatchTime.now()
+        var reason = 0
+        if !roots.matches(collectPostLoginAcknowledgementRoots()) {
+            reason = 2
+        } else {
+            let validation = scope.validateReusedStructure()
+            if validation != .valid {
+                reason = 1 << (validation.rawValue + 2)
+            } else if !roots.matches(collectPostLoginAcknowledgementRoots()) {
+                reason = 4
             }
-            return acknowledgement
+        }
+        guardSeconds = seconds(since: guardStarted)
+        if reason != 0 { return fallback(reason: reason) }
+        return nil
+    }
+
+    private func resolvePostLoginAcknowledgement(
+        in roots: [UIElement], readScope: AXTraversalReadScope? = nil
+    ) -> PostLoginAcknowledgement? {
+        let roles: Set<String> = [kAXButtonRole, kAXStaticTextRole, kAXGroupRole]
+        let roleLimits = [kAXButtonRole: 8, kAXStaticTextRole: 16, kAXGroupRole: 6]
+        // Each guard root collection has seven direct attribute reads and
+        // two ancestor walks of at most eight parent reads. Root children are
+        // then validated once per distinct root. No timing heuristic is used.
+        let guardAXCost = 2 * (7 + 8 + 8) + roots.count
+        for (index, root) in roots.enumerated() {
+            readScope?.considerReuse(in: roots[index...], roles: roles, roleLimits: roleLimits,
+                                     maxNodes: 260, guardAXCost: guardAXCost)
+            if let acknowledgement = resolvePostLoginAcknowledgement(in: root, readScope: readScope) {
+                return acknowledgement
+            }
         }
         return nil
     }
 
-    private func collectPostLoginAcknowledgementRoots() -> [UIElement] {
+    private func collectPostLoginAcknowledgementRoots() -> PostLoginAcknowledgementRoots {
         var roots: [UIElement] = []
-        appendUnique(kakao.focusedWindow, to: &roots)
-        appendUnique(kakao.mainWindow, to: &roots)
-        appendUnique(kakao.applicationElement.focusedUIElement, to: &roots)
-        appendFocusedElementAncestorChain(from: kakao.applicationElement.focusedUIElement, to: &roots)
+        var anchors: [UIElement?] = []
+        func observed(_ element: UIElement?) -> UIElement? {
+            anchors.append(element)
+            return element
+        }
+        appendUnique(observed(kakao.focusedWindow), to: &roots)
+        appendUnique(observed(kakao.mainWindow), to: &roots)
+        appendUnique(observed(kakao.applicationElement.focusedUIElement), to: &roots)
+        appendFocusedElementAncestorChain(from: observed(kakao.applicationElement.focusedUIElement), to: &roots)
 
         let systemWide = UIElement.systemWide()
-        appendUnique(systemWide.focusedUIElement, to: &roots)
-        appendFocusedElementAncestorChain(from: systemWide.focusedUIElement, to: &roots)
+        appendUnique(observed(systemWide.focusedUIElement), to: &roots)
+        appendFocusedElementAncestorChain(from: observed(systemWide.focusedUIElement), to: &roots)
 
-        for window in kakao.windows {
+        let windows = kakao.windows
+        for window in windows {
             appendUnique(window, to: &roots)
         }
 
         appendUnique(kakao.applicationElement, to: &roots)
-        return roots
+        return PostLoginAcknowledgementRoots(roots: roots, anchors: anchors, windows: windows)
     }
 
-    private func resolvePostLoginAcknowledgement(in root: UIElement) -> PostLoginAcknowledgement? {
-        let message = collectPostLoginAcknowledgementText(from: root)
+    private func resolvePostLoginAcknowledgement(
+        in root: UIElement, readScope: AXTraversalReadScope? = nil
+    ) -> PostLoginAcknowledgement? {
+        let message = collectPostLoginAcknowledgementText(from: root, readScope: readScope)
         guard containsPostLoginAcknowledgementMarkers(message) else {
             return nil
         }
@@ -607,13 +715,15 @@ final class KakaoTalkAuthenticator {
         return PostLoginAcknowledgement(root: root, button: button, message: message)
     }
 
-    private func collectPostLoginAcknowledgementText(from root: UIElement) -> String {
+    private func collectPostLoginAcknowledgementText(
+        from root: UIElement, readScope: AXTraversalReadScope? = nil
+    ) -> String {
         let roles: Set<String> = [kAXButtonRole, kAXStaticTextRole, kAXGroupRole]
         let found = root.findAll(roles: roles, roleLimits: [
             kAXButtonRole: 8,
             kAXStaticTextRole: 16,
             kAXGroupRole: 6,
-        ], maxNodes: 260)
+        ], maxNodes: 260, readScope: readScope)
 
         let tokens = (found[kAXStaticTextRole] ?? []) + (found[kAXButtonRole] ?? []) + (found[kAXGroupRole] ?? [])
         return normalizedText(tokens.map {
@@ -624,6 +734,22 @@ final class KakaoTalkAuthenticator {
                 $0.identifier,
             ].compactMap { $0 }.joined(separator: " ")
         }.joined(separator: " "))
+    }
+
+    private func seconds(since start: DispatchTime) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
+    }
+
+    private func emitAcknowledgementMetrics() {
+        for line in AuthAcknowledgementDiagnostics.lines(acknowledgementMetrics) {
+            if let authDiagnostic {
+                authDiagnostic(line)
+            } else {
+                // A closed diagnostic pipe must not change authentication.
+                try? FileHandle.standardError.write(contentsOf: Data((line + "\n").utf8))
+            }
+        }
+        acknowledgementMetrics.removeAll(keepingCapacity: false)
     }
 
     private func containsLoginMarkers(_ text: String) -> Bool {
