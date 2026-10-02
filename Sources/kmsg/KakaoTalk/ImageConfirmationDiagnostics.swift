@@ -8,6 +8,8 @@ final class ImageConfirmationDiagnostics {
     private let started: UInt64
     var lookups = 0, directPresent = 0, directEmpty = 0, directUnknown = 0
     var fallbackWalks = 0, fallbackVisits = 0, fallbackUnknownRoles = 0, fallbackFound = 0
+    // Actual requests made by the fallback BFS, excluding direct and containment reads.
+    var fallbackBatchReads = 0, fallbackRoleScalarReads = 0, fallbackChildrenScalarReads = 0
     var containsWalks = 0, containsVisits = 0, containsFound = 0
     private var lookupSeconds = 0.0, containsSeconds = 0.0
 
@@ -44,9 +46,10 @@ final class ImageConfirmationDiagnostics {
             if bounded != value { clipped = true }
             return String(format: "%.3f", bounded)
         }
-        var output = "[kmsg] image-confirmation total=\(seconds(elapsed(since: started))) status=done schema=1"
+        var output = "[kmsg] image-confirmation total=\(seconds(elapsed(since: started))) status=done schema=2"
         output += " lookups=\(count(lookups)) direct=\(count(directPresent)) empty=\(count(directEmpty)) unknown=\(count(directUnknown))"
         output += " walks=\(count(fallbackWalks)) visits=\(count(fallbackVisits)) roles=\(count(fallbackUnknownRoles)) found=\(count(fallbackFound))"
+        output += " batch=\(count(fallbackBatchReads)) rfallback=\(count(fallbackRoleScalarReads)) cfallback=\(count(fallbackChildrenScalarReads))"
         output += " contains=\(count(containsWalks)) cvisits=\(count(containsVisits)) cfound=\(count(containsFound))"
         output += " lookup=\(seconds(lookupSeconds)) containment=\(seconds(containsSeconds)) clip=\(clipped ? 1 : 0)"
         return output

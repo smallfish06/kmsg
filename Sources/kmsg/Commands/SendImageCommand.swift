@@ -347,15 +347,47 @@ struct SendImageCommand: ParsableCommand {
             diagnostics?.directUnknown += 1
         }
         diagnostics?.fallbackWalks += 1
-        let found = window.findFirst(where: {
-            let role = $0.role
-            diagnostics?.fallbackVisits += 1
-            if role == nil { diagnostics?.fallbackUnknownRoles += 1 }
-            return role == kAXSheetRole
-        })
+        let found = findConfirmationSheetInDescendants(of: window, diagnostics: diagnostics)
         if found != nil { diagnostics?.fallbackFound += 1 }
         return found
     }
+
+    // Keep the existing BFS and Optional result. Batching changes when a
+    // node's role and children are observed, not the authority of a missing
+    // sheet or the existing completion/retry policy.
+    private func findConfirmationSheetInDescendants(
+        of window: UIElement, diagnostics: ImageConfirmationDiagnostics?
+    ) -> UIElement? {
+        var queue = window.children
+        var index = 0
+        while index < queue.count {
+            let current = queue[index]
+            index += 1
+            diagnostics?.fallbackBatchReads += 1
+            let values = current.batchAttributes([kAXRoleAttribute, kAXChildrenAttribute])
+            let batchRole = values[0] as? String
+            let role: String?
+            if let batchRole {
+                role = batchRole
+            } else {
+                diagnostics?.fallbackRoleScalarReads += 1
+                role = current.role
+            }
+            diagnostics?.fallbackVisits += 1
+            if role == nil { diagnostics?.fallbackUnknownRoles += 1 }
+            if role == kAXSheetRole { return current }
+            // If role needed a scalar retry, discard the earlier children
+            // slot and retain the original role-before-children read order.
+            if batchRole != nil, let children = values[1] as? [AXUIElement] {
+                queue.append(contentsOf: children.map { UIElement($0) })
+            } else {
+                diagnostics?.fallbackChildrenScalarReads += 1
+                queue.append(contentsOf: current.children)
+            }
+        }
+        return nil
+    }
+
 
     private func findSendButton(in confirmationSheet: UIElement) -> UIElement? {
         confirmationSheet.findAll(role: kAXButtonRole).first { button in

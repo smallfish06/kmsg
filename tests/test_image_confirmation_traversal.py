@@ -1,4 +1,8 @@
-"""Compare real image-confirmation methods before/after numeric instrumentation."""
+"""Preserve image result semantics while measuring the dedicated batch BFS.
+
+Detailed real AXValue decoding and temporal boundaries are covered separately by
+test_image_confirmation_batch.py. No GUI or native command is invoked.
+"""
 from pathlib import Path
 import json
 import shutil
@@ -22,7 +26,7 @@ struct Date {
     func timeIntervalSince(_ prior: Date) -> Double { Clock.seconds-prior.value }
 }
 enum Thread { static func sleep(forTimeInterval s: Double) { Clock.seconds += s } }
-let kAXSheetRole="AXSheet",kAXSheetsAttribute="AXSheets"
+let kAXSheetRole="AXSheet",kAXSheetsAttribute="AXSheets",kAXRoleAttribute="AXRole",kAXChildrenAttribute="AXChildren"
 typealias AXUIElement=Node
 final class Node {
     let id:Int;var role:String?;var children:[Node]=[];var sheets:Any?=nil
@@ -36,6 +40,10 @@ final class UIElement {
     var role:String?{Clock.read();return axElement.role}
     var children:[UIElement]{Clock.read();return axElement.childrenFail ? []:axElement.children.map(UIElement.init)}
     func attributeOptional<T>(_ name:String)->T?{Clock.read();return axElement.sheets as? T}
+    func batchAttributes(_ names:[String])->[Any?]{
+        Clock.read()
+        return [axElement.role as Any?, axElement.childrenFail ? nil:axElement.children]
+    }
     // FIND_FIRST
 }
 struct AXActionRunner {
@@ -87,7 +95,8 @@ def render(variant):
     else:
         methods = '\n'.join(block(command, command.index('    private func ' + n + '(')) for n in [
             'waitForConfirmationSheet', 'locateConfirmationSheet', 'waitForSendCompletion',
-            'windowContainsElement', 'areSameAXElement'])
+            'windowContainsElement', 'areSameAXElement', 'findConfirmationSheetInDescendants'])
+        methods = methods.replace('            let current = queue[index]', '            let current = queue[index]\n            Clock.visits += 1')
     ui = (ROOT / 'Sources/kmsg/Accessibility/UIElement.swift').read_text()
     find = block(ui, ui.index('    public func findFirst(where predicate:'))
     find = find.replace('            let current = queue[index]', '            let current = queue[index]\n            Clock.visits += 1')
@@ -114,11 +123,18 @@ class ImageConfirmationTraversalTests(unittest.TestCase):
                 run = subprocess.run([str(binary)], text=True, capture_output=True, check=True)
                 cls.results[variant] = json.loads(run.stdout)
 
-    def test_all_40_results_and_existing_ax_work_are_identical(self):
+    def test_all_40_result_shapes_remain_identical(self):
         self.assertEqual(len(self.results['baseline']), 40)
-        fields = ['case', 'mode', 'enabled', 'result', 'axCalls', 'visits', 'seconds']
+        fields = ['case', 'mode', 'enabled', 'result']
         for old, new in zip(self.results['baseline'], self.results['candidate']):
             self.assertEqual({k: old[k] for k in fields}, {k: new[k] for k in fields})
+
+    def test_supported_large_walk_reduces_requests_but_role_errors_cost_more(self):
+        def row(variant,name):
+            return next(x for x in self.results[variant] if x['case']==name and x['mode']=='wait' and x['enabled'])
+        self.assertLess(row('candidate','large-absent')['axCalls'],row('baseline','large-absent')['axCalls'])
+        self.assertGreater(row('candidate','missing-roles')['axCalls'],row('baseline','missing-roles')['axCalls'])
+        self.assertEqual(row('candidate','direct-sheet')['axCalls'],row('baseline','direct-sheet')['axCalls'])
 
     def test_disabled_diagnostics_are_absent(self):
         for row in self.results['candidate']:
@@ -141,7 +157,7 @@ class ImageConfirmationTraversalTests(unittest.TestCase):
         rows = self.results['candidate']
         def row(name, mode):
             return next(x for x in rows if x['case'] == name and x['mode'] == mode and x['enabled'])
-        self.assertGreater(row('large-absent', 'wait')['seconds'], 20)
+        self.assertGreater(row('large-absent', 'wait')['seconds'], 1.5)
         self.assertTrue(row('failed-children', 'complete')['result'])
         self.assertTrue(row('direct-failed-children', 'complete')['result'])
 
