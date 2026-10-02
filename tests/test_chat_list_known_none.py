@@ -398,6 +398,29 @@ class ChatListKnownNoneTests(unittest.TestCase):
         self.assertIn('total=86400.000', self.bounds['line'])
         self.assertIn('clip=1', self.bounds['line'])
 
+    def test_compact_failure_keeps_guard_verdict_without_dropping_fields(self):
+        # Production compactErrorMessage joins stderr then keeps 400 chars.
+        # Four natural failures had 314/316 chars before this diagnostic.
+        # Reproduce only the measured length; never retain the source prefix.
+        prefix = 'SYNTHETIC_EXEC_PREFIX '.ljust(316, 'x')
+        line = self.bounds['line']
+        fields = dict(token.split('=', 1) for token in line.split()[2:])
+        expected = {'total', 'status', 'schema', 'seq', 'gate', 'reads', 'none',
+                    'unknown', 'literal', 'issues', 'nv', 'uns', 'cuts',
+                    'admitted', 'restart', 'guardRows', 'guardNodes',
+                    'guardFail', 'order', 'target', 'clip'}
+        self.assertEqual(set(fields), expected)
+        self.assertEqual(len(line.split()[2:]), len(expected))
+        compact = (prefix + line)[:400]
+        self.assertIn(' guardFail=6 ', compact)
+        # This recovers the guard verdict, not a complete diagnostic group.
+        self.assertNotIn(' target=1 ', compact)
+        old_order = ('total status schema seq gate reads none unknown literal '
+                     'issues nv uns cuts admitted restart guardRows guardNodes '
+                     'guardFail order target clip').split()
+        old_line = '[kmsg] hint-evidence ' + ' '.join(f'{k}={fields[k]}' for k in old_order)
+        self.assertNotIn(' guardFail=6 ', (prefix + old_line)[:400])
+
     def test_budget_failures_are_bounded_by_existing_full_prefix(self):
         for name in ['many-none-budget', 'order-changed-budget', 'deadline-retry']:
             candidate = self.by[name, 'candidate']

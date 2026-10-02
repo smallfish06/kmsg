@@ -76,9 +76,13 @@ final class ChatListHintEvidence {
         let elapsed = min(seconds, 86400)
         if elapsed != seconds { clipped = true }
         var output = "[kmsg] hint-evidence total=\(String(format: "%.3f", elapsed)) status=ok schema=1 seq=\(number(sequence))"
-        output += " gate=\(number(gate)) reads=\(number(reads)) none=\(number(none)) unknown=\(number(unknown)) literal=\(number(literal))"
+        // Legacy bridge failures retain only a short stderr prefix. Keep the
+        // fixed guard verdict near the header so truncation cannot hide which
+        // validation failed. This is field ordering, not new scan authority.
+        output += " gate=\(number(gate)) guardFail=\(number(guardFailure)) order=\(number(order)) target=\(number(target))"
+        output += " reads=\(number(reads)) none=\(number(none)) unknown=\(number(unknown)) literal=\(number(literal))"
         output += " issues=\(number(issues)) nv=\(number(noValue)) uns=\(number(unsupported)) cuts=\(number(cuts)) admitted=\(number(admitted)) restart=\(number(restarts))"
-        output += " guardRows=\(number(guardRows)) guardNodes=\(number(guardNodes)) guardFail=\(number(guardFailure)) order=\(number(order)) target=\(number(target))"
+        output += " guardRows=\(number(guardRows)) guardNodes=\(number(guardNodes))"
         output += " clip=\(clipped ? 1 : 0)"
         return output
     }
