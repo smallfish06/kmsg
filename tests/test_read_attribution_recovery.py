@@ -24,6 +24,7 @@ final class TranscriptObservationSources {
     func readIdentifier(_ identity: Int) -> TranscriptReadEvidenceDiagnostics.IdentifierSample { .unsupported }
 }
 final class FrameCache {
+    var parseCost: TranscriptParseCost?
     var observationSources: TranscriptObservationSources?
     var readEvidence: TranscriptReadEvidenceDiagnostics?
     var lastCollectedRow: Int?
@@ -167,7 +168,8 @@ class ReadAttributionRecoveryTests(unittest.TestCase):
             side_start = source.index("    private func inferMessageSide(")
             side_end = source.index("    private func resolveAuthorInSegment(", side_start)
             side = source[side_start:side_end].replace("private func", "func", 1)
-            main.write_text(STUBS + extraction + side + "\n}\n" + FIXTURES)
+            helper = source[source.index("private final class TranscriptParseCost {"):].replace("private final class", "final class", 1)
+            main.write_text(STUBS + extraction + side + "\n}\n" + helper + FIXTURES)
             binary = Path(tmp) / "recovery-check"
             sdk_args = []
             if sys.platform == "darwin" and not os.environ.get("SDKROOT"):

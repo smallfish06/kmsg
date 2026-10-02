@@ -500,24 +500,12 @@ struct KakaoTalkTranscriptReader {
             var provenance: TranscriptParseProvenance
         }
 
-        // Cost ownership spans every attempted row parse, not only the selected
-        // pass. The flat fallback is timed separately; no UI value is retained.
-        let parseCost = readPhase.map { _ in TranscriptParseCost() }
         var notes: [(key: String, value: String)] = []
         let observationsEnabled = TranscriptNativeObservation.isEnabled
         let initialSources = observationsEnabled ? TranscriptObservationSources() : nil
         func parsePass(from rows: [UIElement], cache: FrameCache,
                        sources: TranscriptObservationSources?, provenance: TranscriptParseProvenance) -> TranscriptParsePass {
             cache.observationSources = sources
-            cache.parseCost = parseCost
-            parseCost?.add(.passes)
-            switch provenance {
-            case .initial: parseCost?.add(.initial)
-            case .freshSparse: parseCost?.add(.freshSparse)
-            case .heldSparse: parseCost?.add(.heldSparse)
-            case .attributionRecovery: parseCost?.add(.attribution)
-            case .retainedAfterSparseFailure, .fallbackMixed: break
-            }
             cache.readEvidence?.resetParsing()
             let messages = parseMessages(from: rows, transcriptRoot: transcriptRoot, limit: limit,
                 includeSystemMessages: includeSystemMessages, referenceDate: referenceDate, frameCache: cache)
@@ -646,28 +634,13 @@ struct KakaoTalkTranscriptReader {
         if selected.messages.isEmpty || selected.messages.count < fallbackThreshold {
             readPhase?("fallback")
             selected.provenance = .fallbackMixed
-            let fallbackStarted = parseCost?.mark()
-            parseCost?.add(.fallbackCalls)
             let fallback = extractFallbackMessages(from: transcriptRoot, limit: limit, referenceDate: referenceDate,
                                                    observationSources: selected.observationSources)
-            parseCost?.end(.fallback, fallbackStarted)
             runner.log("read: fallback messages=\(fallback.count)")
             selected.messages.append(contentsOf: fallback)
             notes.append((key: "fb", value: "\(fallback.count)"))
         }
 
-        let selectedPass: Int
-        switch selected.provenance {
-        case .initial: selectedPass = 1
-        case .freshSparse: selectedPass = 2
-        case .heldSparse: selectedPass = 3
-        case .retainedAfterSparseFailure: selectedPass = 4
-        case .attributionRecovery: selectedPass = 5
-        case .fallbackMixed: selectedPass = 6
-        }
-        // Keep the existing evidence part1/part2 -> read-detail adjacency.
-        // "done" means cost collection ended, not that the read or send succeeded.
-        parseCost?.emit(selectedPass: selectedPass)
         guard selected.observationSources != nil else {
             return (Array(deduplicateMessagesPreservingOrder(selected.messages).suffix(limit)), notes)
         }
@@ -688,7 +661,16 @@ struct KakaoTalkTranscriptReader {
             else if selectedSources.contains(where: { sources.matches($0?.row, selected.frameCache.lastCollectedRow) }) {
                 lastCollectedRowSelection = 2
             } else { lastCollectedRowSelection = 3 }
-            TranscriptReadEvidenceDiagnostics.emit(snapshot: evidence, pass: selectedPass,
+            let pass: Int
+            switch selected.provenance {
+            case .initial: pass = 1
+            case .freshSparse: pass = 2
+            case .heldSparse: pass = 3
+            case .retainedAfterSparseFailure: pass = 4
+            case .attributionRecovery: pass = 5
+            case .fallbackMixed: pass = 6
+            }
+            TranscriptReadEvidenceDiagnostics.emit(snapshot: evidence, pass: pass,
                 sources: selectedSources.suffix(3).map { (row: $0?.row, body: $0?.body) },
                 lastRowSourcePresent: last?.row != nil, lastBodySourcePresent: last?.body != nil,
                 lastCollectedRowCompared: last?.row != nil && selected.frameCache.lastCollectedRow != nil,
@@ -714,9 +696,6 @@ struct KakaoTalkTranscriptReader {
         referenceDate: Date,
         frameCache: FrameCache
     ) -> [TranscriptMessage] {
-        let parseCost = frameCache.parseCost
-        let parseStarted = parseCost?.mark()
-        defer { parseCost?.end(.parse, parseStarted) }
         // Analyze bottom-up and stop once enough message-yielding rows have
         // surfaced: only the last `limit` messages survive anyway, and each
         // row analysis costs hundreds of AX round-trips. A small margin
@@ -749,8 +728,6 @@ struct KakaoTalkTranscriptReader {
         if reversedAnalyses.count < rowsToAnalyze.count {
             runner.log("read: row analysis early stop after \(reversedAnalyses.count)/\(rowsToAnalyze.count) rows")
         }
-        let finalizeStarted = parseCost?.mark()
-        defer { parseCost?.end(.messageFinalize, finalizeStarted) }
         var analyses = Array(reversedAnalyses.reversed())
         // The center of a wide outgoing text bubble can fall in the ambiguous
         // band even though its right edge matches every short outgoing bubble
@@ -997,11 +974,6 @@ struct KakaoTalkTranscriptReader {
         referenceDate: Date,
         frameCache: FrameCache
     ) -> RowAnalysis {
-        let parseCost = frameCache.parseCost
-        let rowStarted = parseCost?.mark()
-        defer { parseCost?.end(.rows, rowStarted) }
-        parseCost?.add(.rows)
-        let structureStarted = parseCost?.mark()
         let rowChildren: [UIElement]
         if let evidence = frameCache.readEvidence {
             // The same children read as the ordinary parser, with its typed
@@ -1014,8 +986,6 @@ struct KakaoTalkTranscriptReader {
         } else { rowChildren = row.children }
         let directCells = rowChildren.filter { $0.role == kAXCellRole }
         let containers = directCells.isEmpty ? [row] : directCells
-        parseCost?.end(.structure, structureStarted)
-        parseCost?.add(.containers, containers.count)
 
         var bodyCandidates: [MessageBodyCandidate] = []
         var metadataTokensBuffer: [String] = []
@@ -1027,7 +997,6 @@ struct KakaoTalkTranscriptReader {
         var urlTokenCount = 0
 
         for container in containers {
-            let directStarted = parseCost?.mark()
             var textAreas: [UIElement] = []
             var staticTexts: [UIElement] = []
             var images: [UIElement] = []
@@ -1057,7 +1026,6 @@ struct KakaoTalkTranscriptReader {
             let hasDirectTextImagePair = !directCells.isEmpty && !hasOtherDirectContent
                 && textAreas.count == 1 && images.count == 1
             var siblingBody: MessageBodyCandidate?
-            parseCost?.end(.structure, directStarted)
 
             let missingRoles = [
                 textAreas.isEmpty ? kAXTextAreaRole : nil,
@@ -1073,10 +1041,6 @@ struct KakaoTalkTranscriptReader {
                 // huge bubble subtree (e.g. mail-notification chats) does not
                 // cost a full 140-node walk per row.
                 let bodyMissing = textAreas.isEmpty && staticTexts.isEmpty
-                let backfillStarted = parseCost?.mark()
-                parseCost?.add(.backfillCalls)
-                parseCost?.add(.requestedRoles, missingRoles.count)
-                if bodyMissing { parseCost?.add(.deepBackfills) }
                 let found = container.findAll(
                     roles: Set(missingRoles),
                     roleLimits: [
@@ -1093,15 +1057,8 @@ struct KakaoTalkTranscriptReader {
                 if images.isEmpty { images = found[kAXImageRole] ?? [] }
                 if buttons.isEmpty { buttons = found[kAXButtonRole] ?? [] }
                 if links.isEmpty { links = found[kAXLinkRole] ?? [] }
-                parseCost?.end(.backfill, backfillStarted)
             }
 
-            parseCost?.add(.staticTexts, staticTexts.count)
-            parseCost?.add(.buttons, buttons.count)
-            parseCost?.add(.textAreas, textAreas.count)
-            parseCost?.add(.images, images.count)
-            parseCost?.add(.links, links.count)
-            let richStarted = parseCost?.mark()
             let contentFrames = (textAreas + links).compactMap { frameCache.frame(of: $0) }
                 + images.compactMap { frameCache.frame(of: $0) }.filter { $0.width > 72 || $0.height > 72 }
             let hasRichContent = !links.isEmpty
@@ -1110,8 +1067,6 @@ struct KakaoTalkTranscriptReader {
                     return frame.width > 72 || frame.height > 72
                 }
                 || textAreas.contains { countURLTokens(in: normalizeBodyText($0.stringValue)) > 0 }
-            parseCost?.end(.rich, richStarted)
-            let staticStarted = parseCost?.mark()
             for staticText in staticTexts {
                 let (rawValue, help) = staticText.valueAndHelp()
                 frameCache.readEvidence?.recordHelp(help)
@@ -1129,8 +1084,6 @@ struct KakaoTalkTranscriptReader {
                 urlTokenCount += countURLTokens(in: normalized)
             }
 
-            parseCost?.end(.staticMetadata, staticStarted)
-            let buttonsStarted = parseCost?.mark()
             for button in buttons {
                 let title = normalizeBodyText(button.title)
                 guard !title.isEmpty else { continue }
@@ -1138,8 +1091,6 @@ struct KakaoTalkTranscriptReader {
                 urlTokenCount += countURLTokens(in: title)
             }
 
-            parseCost?.end(.buttons, buttonsStarted)
-            let bodyStarted = parseCost?.mark()
             linkElementCount += links.count
 
             for textArea in textAreas {
@@ -1177,11 +1128,8 @@ struct KakaoTalkTranscriptReader {
                 bodyCandidates.append(linkBody)
                 linkElementCount = max(linkElementCount, 1)
             }
-            parseCost?.end(.bodyLinks, bodyStarted)
         }
 
-        let finalizeStarted = parseCost?.mark()
-        defer { parseCost?.end(.rowFinalize, finalizeStarted) }
         let bestBody = deduplicateBodyCandidates(bodyCandidates).max { lhs, rhs in
             scoreBodyCandidate(lhs.body) < scoreBodyCandidate(rhs.body)
         }
@@ -2079,7 +2027,6 @@ private enum MessageSide: String, Hashable {
 }
 
 private final class FrameCache {
-    var parseCost: TranscriptParseCost?
     var observationSources: TranscriptObservationSources?
     var readEvidence: TranscriptReadEvidenceDiagnostics?
     var lastCollectedRow: AXUIElement?
@@ -2136,62 +2083,5 @@ private final class TranscriptObservationSources {
         } catch {
             return .failed
         }
-    }
-}
-
-
-/// Numeric-only diagnostic ownership for one extractMessages call. Row slices
-/// aggregate all attempted row-parser passes, including discarded retries.
-/// Flat fallback has its own elapsed slice; its metadata re-analysis is not
-/// included in these row slices. No timing controls a read or a proof decision.
-private final class TranscriptParseCost {
-    enum Slice: Int, CaseIterable {
-        case parse, rows, structure, backfill, rich, staticMetadata, buttons
-        case bodyLinks, rowFinalize, messageFinalize, fallback
-    }
-    enum Count: Int, CaseIterable {
-        case passes, initial, freshSparse, heldSparse, attribution, rows, containers
-        case backfillCalls, deepBackfills, requestedRoles, staticTexts, buttons
-        case textAreas, images, links, fallbackCalls
-    }
-    private var durations = Array(repeating: UInt64(0), count: Slice.allCases.count)
-    private var counts = Array(repeating: UInt64(0), count: Count.allCases.count)
-    private let now: () -> UInt64
-    private var emitted = false
-
-    init(now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }) { self.now = now }
-    func mark() -> UInt64 { now() }
-    func end(_ slice: Slice, _ started: UInt64?) {
-        guard let started else { return }
-        let finished = now()
-        let elapsed = finished >= started ? finished - started : 0
-        let cap: UInt64 = 1_000_000_000_000
-        durations[slice.rawValue] = min(cap, durations[slice.rawValue] + min(cap, elapsed))
-    }
-    func add(_ field: Count, _ value: Int = 1) {
-        counts[field.rawValue] = min(100_000, counts[field.rawValue] + UInt64(min(100_000, max(0, value))))
-    }
-    func line(selectedPass: Int) -> String {
-        var clipped = false
-        func bounded(_ value: UInt64) -> String {
-            if value > 99_999 { clipped = true }
-            return String(min(value, 99_999))
-        }
-        let millis = (["1"] + durations.map { bounded($0 / 1_000_000) }).joined(separator: "/")
-        let numbers = (["1"] + counts.map { bounded($0) }).joined(separator: "/")
-        // parse includes rows/messageFinalize; row substeps are nested in rows.
-        // Only parse and flat fallback are disjoint and form this total.
-        let totalNanos = durations[Slice.parse.rawValue] + durations[Slice.fallback.rawValue]
-        if totalNanos > 999_999_000_000 { clipped = true }
-        let total = Double(min(totalNanos, 999_999_000_000)) / 1_000_000_000
-        let pass = (0...6).contains(selectedPass) ? selectedPass : 0
-        return "[kmsg] parse-cost total=\(String(format: "%.3f", total)) status=done schema=1 selected=\(pass) ms=\(millis) counts=\(numbers) clip=\(clipped ? 1 : 0)"
-    }
-    func emit(selectedPass: Int, write: ((String) -> Void)? = nil) {
-        guard !emitted else { return }
-        emitted = true
-        let summary = line(selectedPass: selectedPass)
-        if let write { write(summary) }
-        else { try? FileHandle.standardError.write(contentsOf: Data((summary + "\n").utf8)) }
     }
 }
