@@ -52,35 +52,14 @@ enum ChatTextNormalizer {
     }
 
     static func isTimeLikeValue(_ value: String) -> Bool {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        let parts = trimmed.split(separator: ":")
-        if parts.count == 2,
-           parts[0].count <= 2, parts[1].count == 2,
-           parts[0].allSatisfy(\.isNumber), parts[1].allSatisfy(\.isNumber)
-        {
-            return true
-        }
-
-        if trimmed.hasSuffix("일") || trimmed == "어제" || trimmed == "그저께" {
-            return true
-        }
-
-        return false
+        // Reject only complete timestamp formats. A suffix such as "일" is
+        // also part of names (성일, 전창일); dropping those names let the next
+        // cell ("오후 8:45") become the room title and broke code connections.
+        isClockLikeValue(value)
     }
 
-    /// Row-timestamp detector for friends-tab detection.
-    ///
-    /// This one is deliberately NARROWER than `isTimeLikeValue`. That predicate
-    /// answers "could this text be a timestamp, so don't use it as a title?" and
-    /// errs wide on purpose — it accepts anything ending in "일". Here the
-    /// question is the opposite: a single matching string is enough to declare
-    /// the list a CHAT list, so a wide predicate is a way to be fooled. A
-    /// friend's status message ending in "일" ("매일", "생일", "내일", …) anywhere
-    /// in the top rows silently certified the friends tab as the chat list, and
-    /// then every bound room looked permanently quiet because a friends row's
-    /// "preview" is a status message that never changes when messages arrive
-    /// (2026-08-09: 5분 48초 동안 수신 전면 정지, 미조 349s / 채희 369s 지연).
-    ///
+    /// Complete row-timestamp formats shared by title filtering and the
+    /// friends-tab fallback. A name or status ending in "일" is not a date.
     /// Accepts exactly what the chat list renders in its timestamp cell,
     /// measured live: "오후 11:47", "어제", "1월 10일", "2020. 1. 20.".
     static func isClockLikeValue(_ value: String) -> Bool {
@@ -812,10 +791,8 @@ struct ChatListScanner {
         }
         if !fromTextArea {
             // Static-text fallback only: here a bare number is the badge and a
-            // clock string is the row's timestamp cell. isTimeLikeValue alone
-            // misses "오후 6:06" (it only knows bare "11:47"), which is how the
-            // timestamp leaked out as a preview.
-            if ChatTextNormalizer.isTimeLikeValue(value) || ChatTextNormalizer.isClockLikeValue(value)
+            // clock string is the row's timestamp cell.
+            if ChatTextNormalizer.isClockLikeValue(value)
                 || ChatTextNormalizer.isUnreadCountLike(value)
             {
                 return nil

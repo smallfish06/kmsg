@@ -337,9 +337,23 @@ class ChatListKnownNoneTests(unittest.TestCase):
                 self.assertFalse(self.by[name, 'candidate']['hint'])
 
     def test_normal_and_wrong_tab_paths_do_not_add_ax(self):
-        for name in ['valid', 'korean-clock', 'duplicate-before', 'friends']:
+        for name in ['valid', 'duplicate-before', 'friends']:
             with self.subTest(case=name):
                 self.assertEqual(self.by[name, 'candidate']['ipc'], self.by[name, 'legacy']['ipc'])
+
+    def test_timestamp_only_rows_use_verified_no_title_retry(self):
+        # A Korean clock is now rejected as a title just like a bare clock.
+        # The candidate can verify this title-less row and keep the title hint;
+        # the historical scanner falls back to its more expensive full walk.
+        for name in ['time', 'korean-clock']:
+            with self.subTest(case=name):
+                candidate = self.by[name, 'candidate']
+                self.assertEqual(candidate['match'], 'row-245')
+                self.assertEqual(candidate['match'], self.by[name, 'full']['match'])
+                self.assertEqual(candidate['match'], self.by[name, 'legacy']['match'])
+                self.assertTrue(candidate['hint'])
+                self.assertFalse(candidate['cut'])
+                self.assertLess(candidate['calls'], self.by[name, 'legacy']['calls'])
 
     def test_changed_guard_and_many_none_keep_fallback_cost(self):
         for name in ['many-none', 'no-direct-order', 'retry-transient', 'order-changed', 'guard-order-error']:
