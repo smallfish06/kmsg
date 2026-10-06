@@ -95,7 +95,7 @@ print(String(decoding: try JSONEncoder().encode(observations), as: UTF8.self))
 '''
 
 
-def fixture(name, clock="오후 5:05", preview="104813", badge=1,
+def fixture(name, clock="오후 5:05", preview="123456", badge=1,
             clock_first=False, row_title=False):
     return dict(name=name, clock=clock, preview=preview, badge=badge,
                 clockFirst=clock_first, rowTitle=row_title)
@@ -122,7 +122,7 @@ class ChatTitleTimestampTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_names_ending_in_il_remain_titles(self):
-        names = ["전창일", "성일", "김철일", "금요일", "생일", "매일", "내일", "기념일", "일"]
+        names = ["홍길일", "김성일", "김철일", "금요일", "생일", "매일", "내일", "기념일", "일"]
         for row_title in (False, True):
             observed = self.observe([fixture(name, row_title=row_title) for name in names])
             for name, result in zip(names, observed):
@@ -144,12 +144,12 @@ class ChatTitleTimestampTests(unittest.TestCase):
         for result in self.observe(rows):
             with self.subTest(result=result):
                 self.assertEqual(result["title"], "(Unknown Chat)")
-                self.assertEqual(result["preview"], "104813")
+                self.assertEqual(result["preview"], "123456")
 
     def test_connect_codes_and_badges_survive_title_classification(self):
-        rows = [fixture("전창일", clock="오후 5:05", preview="104813"),
-                fixture("성일", clock="오후 8:45", preview="990910", badge=2),
-                fixture("김철일", clock="오후 11:40", preview="064068", clock_first=True)]
+        rows = [fixture("홍길일", clock="오후 5:05", preview="123456"),
+                fixture("김성일", clock="오후 8:45", preview="654321", badge=2),
+                fixture("김철일", clock="오후 11:40", preview="001234", clock_first=True)]
         for row, result in zip(rows, self.observe(rows)):
             with self.subTest(name=row["name"]):
                 self.assertEqual(result["title"], row["name"])
@@ -161,7 +161,7 @@ class ChatTitleTimestampTests(unittest.TestCase):
         for name, result in zip(names, self.observe([fixture(name) for name in names])):
             with self.subTest(name=name):
                 self.assertEqual(result["title"], name)
-                self.assertEqual(result["preview"], "104813")
+                self.assertEqual(result["preview"], "123456")
 
 
 if __name__ == "__main__":

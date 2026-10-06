@@ -53,7 +53,7 @@ enum ChatTextNormalizer {
 
     static func isTimeLikeValue(_ value: String) -> Bool {
         // Reject only complete timestamp formats. A suffix such as "일" is
-        // also part of names (성일, 전창일); dropping those names let the next
+        // also part of names (김철일, 홍길일); dropping those names let the next
         // cell ("오후 8:45") become the room title and broke code connections.
         isClockLikeValue(value)
     }
