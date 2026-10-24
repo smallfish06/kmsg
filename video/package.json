@@ -9,17 +9,20 @@
     "build": "remotion render KmsgVideo out/kmsg-video.mp4 --codec h264"
   },
   "dependencies": {
-    "@remotion/cli": "4.0.429",
-    "@remotion/google-fonts": "4.0.429",
-    "@remotion/tailwind": "4.0.429",
-    "@remotion/transitions": "4.0.429",
+    "@remotion/cli": "4.0.538",
+    "@remotion/google-fonts": "4.0.538",
+    "@remotion/tailwind": "4.0.538",
+    "@remotion/transitions": "4.0.538",
     "react": "^19",
     "react-dom": "^19",
-    "remotion": "4.0.429"
+    "remotion": "4.0.538"
   },
   "devDependencies": {
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "typescript": "^5"
+  },
+  "overrides": {
+    "zod": "^4.6.7"
   }
 }
