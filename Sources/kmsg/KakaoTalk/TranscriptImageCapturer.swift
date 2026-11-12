@@ -123,32 +123,57 @@ struct TranscriptImageCapturer {
             axFrame: axWindowFrame,
             axTitle: window.title
         )
-        var capturedCount = 0
+        // Each frame stands or falls alone. One window image serves every
+        // frame, so a frame that cannot be saved says nothing about the
+        // others. Failing the whole read on the first clipped frame used to
+        // discard the newest photo whenever an older photo, or a text bubble's
+        // background image, was cut by the top of the viewport: production
+        // reads holding one photo arrived without pixels 13% of the time,
+        // two photos 46%, three 71%, and never partially (2026-11-12).
+        // A message whose frame is skipped keeps `has_image` and simply
+        // lists fewer paths.
+        var savedCount = 0
+        var partialCount = 0
+        var clippedCount = 0
+        var uncroppableCount = 0
+        var unencodableCount = 0
         var messages: [TranscriptMessage] = []
         messages.reserveCapacity(snapshot.messages.count)
 
-        for message in snapshot.messages {
+        let regions = ImageCaptureRegion.regions(
+            for: snapshot.messages.map(\.imageFrames),
+            in: snapshot.transcriptFrame
+        )
+
+        for (message, messageRegions) in zip(snapshot.messages, regions) {
             var paths: [String] = []
             var hashes: [String] = []
             paths.reserveCapacity(message.imageFrames.count)
             hashes.reserveCapacity(message.imageFrames.count)
 
-            for frame in message.imageFrames {
-                guard isNearlyContained(frame, in: snapshot.transcriptFrame) else {
+            for (frame, region) in zip(message.imageFrames, messageRegions) {
+                guard let region else {
                     runner.log("read: image frame is clipped by the transcript viewport: \(frameDescription(frame))")
+                    clippedCount += 1
                     continue
                 }
                 guard let cropped = crop(
                     capturedWindow.image,
-                    sourceFrame: frame,
+                    sourceFrame: region,
                     windowFrame: capturedWindow.frame,
                     contentRect: capturedWindow.contentRect
                 ) else {
                     runner.log("read: image frame could not be cropped: \(frameDescription(frame))")
+                    uncroppableCount += 1
                     continue
                 }
+                guard let data = try? deterministicJPEG(cropped) else {
+                    runner.log("read: image frame could not be encoded: \(frameDescription(frame))")
+                    unencodableCount += 1
+                    continue
+                }
+                if region != frame { partialCount += 1 }
 
-                let data = try deterministicJPEG(cropped)
                 let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
                 let destination = outputDirectory.appendingPathComponent("\(hash).jpg", isDirectory: false)
                 try data.write(to: destination, options: .atomic)
@@ -159,18 +184,20 @@ struct TranscriptImageCapturer {
 
                 paths.append(destination.path)
                 hashes.append(hash)
-                capturedCount += 1
+                savedCount += 1
             }
 
             messages.append(message.withCapturedImages(paths: paths, sha256: hashes))
         }
 
-        guard capturedCount == expectedCount else {
-            throw TranscriptImageCaptureError.imageCaptureCountMismatch(
-                expected: expectedCount,
-                captured: capturedCount
-            )
-        }
+        // Counts only, on the summary line the bridge already lifts into its
+        // logs. Until now a read that lost its pixels left no trace of why.
+        profiler?.note("cap.frames", String(expectedCount))
+        profiler?.note("cap.saved", String(savedCount))
+        if partialCount > 0 { profiler?.note("cap.partial", String(partialCount)) }
+        if clippedCount > 0 { profiler?.note("cap.clipped", String(clippedCount)) }
+        if uncroppableCount > 0 { profiler?.note("cap.nocrop", String(uncroppableCount)) }
+        if unencodableCount > 0 { profiler?.note("cap.noenc", String(unencodableCount)) }
 
         return TranscriptSnapshot(
             chat: snapshot.chat,
@@ -396,7 +423,8 @@ struct TranscriptImageCapturer {
         guard windowFrame.width > 0, windowFrame.height > 0 else { return nil }
         let clipped = sourceFrame.intersection(windowFrame)
         guard !clipped.isNull, !clipped.isEmpty,
-              visibleAreaRatio(of: sourceFrame, inside: windowFrame) >= 0.98
+              ImageCaptureRegion.visibleAreaRatio(of: sourceFrame, inside: windowFrame)
+                >= ImageCaptureRegion.wholeFrameVisibleRatio
         else {
             return nil
         }
@@ -411,18 +439,6 @@ struct TranscriptImageCapturer {
         let bounded = pixelFrame.intersection(imageBounds).integral
         guard !bounded.isNull, bounded.width >= 1, bounded.height >= 1 else { return nil }
         return image.cropping(to: bounded)
-    }
-
-    private func isNearlyContained(_ frame: CGRect, in bounds: CGRect?) -> Bool {
-        guard let bounds else { return false }
-        return visibleAreaRatio(of: frame, inside: bounds) >= 0.98
-    }
-
-    private func visibleAreaRatio(of frame: CGRect, inside bounds: CGRect) -> CGFloat {
-        guard frame.width > 0, frame.height > 0 else { return 0 }
-        let intersection = frame.intersection(bounds)
-        guard !intersection.isNull, !intersection.isEmpty else { return 0 }
-        return (intersection.width * intersection.height) / (frame.width * frame.height)
     }
 
     private func deterministicJPEG(_ source: CGImage) throws -> Data {

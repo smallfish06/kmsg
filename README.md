@@ -302,7 +302,7 @@ kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json --capture-
 - `messages[].time_raw`: UI에서 읽힌 시각 문자열(없으면 `null`)
 - `messages[].body`: 메시지 본문
 - `messages[].has_image` / `image_count`: 메시지에 포함된 이미지 존재 여부와 개수
-- `messages[].image_paths` / `image_sha256`: `--capture-images` 사용 시에만 포함되는 로컬 JPEG 절대 경로와 각 파일의 SHA-256. 두 배열은 `image_count`와 같은 순서·개수를 가짐
+- `messages[].image_paths` / `image_sha256`: `--capture-images` 사용 시에만 포함되는 로컬 JPEG 절대 경로와 각 파일의 SHA-256. 두 배열은 서로 같은 순서·개수이고, 저장하지 못한 사진이 있으면 `image_count`보다 짧음(비어 있을 수 있음)
 - `messages[].link_count`: 본문에서 감지된 URL 링크 개수
 - `messages[].has_attachment` / `attachment_count`: 이미지를 **제외한** 파일 첨부(문서 등) 존재 여부와 개수. 이미지는 `image_count`로 별도 집계됩니다.
 
@@ -310,7 +310,8 @@ kmsg read "본인, 친구, 또는 단톡방 이름" --limit 20 --json --capture-
 
 - `--json` 사용 시 JSON은 `stdout`으로만 출력됩니다.
 - `--trace-ax` 로그는 `stderr`로 분리되므로 OpenClaw 같은 파이프 연동에서 안전하게 사용할 수 있습니다.
-- 사진이 감지됐지만 같은 개수의 파일을 만들지 못하면 `IMAGE_CAPTURE_COUNT_MISMATCH`로 비정상 종료하며 성공 JSON을 출력하지 않습니다. 따라서 호출자는 해당 읽기 위치를 진행시키면 안 됩니다.
+- 사진은 한 장씩 따로 저장합니다. 대화 영역에 98% 이상 보이는 사진은 통째로, 절반 이상 보이는 사진은 보이는 부분만 저장하고, 그보다 적게 보이는 사진은 저장하지 않습니다. 저장하지 못한 사진의 메시지는 `has_image`는 그대로이고 `image_paths`만 짧아집니다 — 한 장을 못 저장했다고 같은 읽기의 다른 사진까지 버리지 않습니다. 읽기 요약 줄(`[kmsg] read total=…`, stderr)의 `cap.frames`/`cap.saved`/`cap.partial`/`cap.clipped`/`cap.nocrop`/`cap.noenc`가 그 내역입니다.
+- 창 캡처 자체가 실패하면(화면 기록 권한, 창 매칭 실패 등) 메시지는 사진 없이 그대로 출력하고 요약 줄에 `cap.fail=<코드>`를 남깁니다.
 - `--capture-images`를 쓰지 않은 기존 호출에는 `image_paths`와 `image_sha256`가 추가되지 않으며 ScreenCaptureKit 권한도 요구하지 않습니다.
 
 `watch --json`은 배열 하나를 반환하는 대신, 새 메시지가 감지될 때마다 pretty JSON 객체 하나씩을 연속 출력합니다.

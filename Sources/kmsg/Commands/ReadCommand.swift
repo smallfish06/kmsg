@@ -322,6 +322,12 @@ struct ReadCommand: ParsableCommand {
                 FileHandle.standardError.write(
                     Data("read: image capture failed, returning messages without images: \(error.localizedDescription)\n".utf8)
                 )
+                // The line above never reaches the bridge's logs (it keeps
+                // only the summary), so name the failure there too. The code
+                // alone: descriptions can carry paths and system error text.
+                let code = error.localizedDescription.prefix { $0 != ":" }
+                let isCode = !code.isEmpty && code.allSatisfy { $0 == "_" || ($0.isASCII && ($0.isUppercase || $0.isNumber)) }
+                profiler.note("cap.fail", isCode ? String(code) : "OTHER")
                 snapshot = TranscriptSnapshot(
                     chat: snapshot.chat,
                     fetchedAt: snapshot.fetchedAt,
