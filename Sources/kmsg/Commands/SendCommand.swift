@@ -133,6 +133,7 @@ struct SendCommand: ParsableCommand {
         // Same contract as ReadCommand: start marks per phase (survive SIGKILL
         // in the killer's captured stderr) + one summary line on every exit.
         let profiler = PhaseProfiler(command: "send")
+        runner.reportTypingBlocks { key, value in profiler.noteFirst(key, value) }
         var runFailed = true
         defer {
             // Same contract as ReadCommand: any failure invalidates the auth
@@ -316,7 +317,10 @@ struct SendCommand: ParsableCommand {
         _ = tryRaiseWindow(window, runner: runner)
         Thread.sleep(forTimeInterval: 0.1)
 
-        guard let input = resolveMessageInputField(chatWindow: window, kakao: kakao, runner: runner) else {
+        let resolvedInput = DebugTypingHook.isOn("forced")
+            ? nil
+            : resolveMessageInputField(chatWindow: window, kakao: kakao, runner: runner)
+        guard let input = resolvedInput else {
             let forcedTyped = forceTypeIntoChatWindow(chatWindow: window, kakao: kakao, runner: runner)
             guard forcedTyped else {
                 throw KakaoTalkError.actionFailed("[\(SendFailureCode.forcedTypingFailed.rawValue)] Message input field not found and forced typing fallback failed")
@@ -330,10 +334,16 @@ struct SendCommand: ParsableCommand {
         }
 
         let inputReady =
-            runner.setTextWithVerification(message, on: input, label: "message input", attempts: 1) ||
+            (!DebugTypingHook.isOn("typed-draft") &&
+                runner.setTextWithVerification(message, on: input, label: "message input", attempts: 1)) ||
             runner.typeTextWithVerification(message, on: input, label: "message input", attempts: 2)
         guard inputReady else {
             throw KakaoTalkError.actionFailed("[\(SendFailureCode.inputNotReflected.rawValue)] Message input was not reflected")
+        }
+        if DebugTypingHook.isOn("typed-draft") {
+            let typed = input.stringValue ?? ""
+            _ = runner.setTextWithVerification("", on: input, label: "message input debug clear", attempts: 2)
+            throw KakaoTalkError.actionFailed("[DEBUG_TYPED_DRAFT] typed '\(typed)' into the composer and cleared it; nothing was sent")
         }
 
         var sendSucceeded = runner.pressEnterWithVerification(
@@ -559,7 +569,15 @@ struct SendCommand: ParsableCommand {
             return false
         }
         runner.log("fallback: typing into active chat window")
-        _ = runner.typeTextWithVerification(message, on: nil, label: "forced typing", attempts: 1)
+        // 창이 그 방이어도 그 안에서 키 포커스를 쥔 것이 입력창이라는 보장은 없다. 전사
+        // 표가 쥐고 있으면 글자마다 타입 셀렉트가 돌고, 카카오톡이 앞에 있지 않으면 글자가
+        // 앞에 있는 다른 앱으로 간다 — 어느 쪽이든 종전 코드는 Enter 까지 누르고 "✓ sent" 로
+        // 보고했다. 포커스가 카카오톡의 텍스트 입력이 아니면 치지 않고 실패한다
+        // (요약 줄 type.blocked=<역할|otherapp|nofocus>).
+        guard runner.typeTextGuarded(message, into: .focusedTextInput, label: "forced typing") else {
+            runner.log("fallback: keyboard focus is not on a text input; refusing to type blind")
+            return false
+        }
         runner.pressEnterKey()
         Thread.sleep(forTimeInterval: 0.08)
         return true

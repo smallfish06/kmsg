@@ -35,6 +35,7 @@ struct ChatsCommand: ParsableCommand {
 
         let runner = AXActionRunner(traceEnabled: traceAX)
         let profiler = PhaseProfiler(command: "chats")
+        runner.reportTypingBlocks { key, value in profiler.noteFirst(key, value) }
         let detailedTimingEnabled = ProcessInfo.processInfo.environment["KMSG_READ_TIMING_ENABLED"]?.lowercased() == "true"
         defer { profiler.emitSummary(status: "done") }
         profiler.begin("auth")

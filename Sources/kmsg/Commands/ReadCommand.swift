@@ -124,6 +124,7 @@ struct ReadCommand: ParsableCommand {
         }
 
         let runner = AXActionRunner(traceEnabled: traceAX)
+        runner.reportTypingBlocks { key, value in profiler.noteFirst(key, value) }
         profiler.begin("auth")
         let kakao = backgroundSafe
             ? try KakaoTalkApp(autoLaunch: false)

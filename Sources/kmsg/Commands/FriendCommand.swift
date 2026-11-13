@@ -90,6 +90,7 @@ struct FriendAcceptCommand: ParsableCommand {
         }
 
         let runner = AXActionRunner(traceEnabled: traceAX)
+        runner.reportTypingBlocks { key, value in profiler.noteFirst(key, value) }
         profiler.begin("auth")
         let kakao = try AuthBootstrap.requireAuthenticated(traceAX: traceAX)
         let resolver = ChatWindowResolver(
@@ -271,6 +272,7 @@ struct FriendAddCommand: ParsableCommand {
         }
 
         let runner = AXActionRunner(traceEnabled: traceAX)
+        runner.reportTypingBlocks { key, value in profiler.noteFirst(key, value) }
         profiler.begin("auth")
         let kakao = try AuthBootstrap.requireAuthenticated(traceAX: traceAX)
         do {

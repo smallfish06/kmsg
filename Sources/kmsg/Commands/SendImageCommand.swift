@@ -98,6 +98,7 @@ struct SendImageCommand: ParsableCommand {
         }
 
         let runner = AXActionRunner(traceEnabled: traceAX)
+        runner.reportTypingBlocks { key, value in profiler.noteFirst(key, value) }
         profiler.begin("file")
         let imageURL = URL(fileURLWithPath: imagePath)
 

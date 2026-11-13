@@ -40,10 +40,28 @@ struct InspectCommand: ParsableCommand {
     @Option(name: .long, help: "Row summary range start:end (inclusive, zero-based)")
     var rowRange: String?
 
+    @Flag(name: .long, help: "Only report which element holds keyboard focus and whether kmsg would type into it")
+    var focus: Bool = false
+
     func run() throws {
         guard AccessibilityPermission.ensureGranted() else {
             AccessibilityPermission.printInstructions()
             throw ExitCode.failure
+        }
+
+        if focus {
+            // Read-only, and deliberately before anything that activates
+            // KakaoTalk: activating would move the focus being reported.
+            let (observation, verdict) = AXActionRunner(traceEnabled: false).currentTypingFocus()
+            let role = observation.focusReadable ? (observation.role ?? "(no role)") : "(unreadable)"
+            print("Focused element: role=\(role) subrole=\(observation.subrole ?? "-") other-app=\(observation.focusInOtherApp)")
+            switch verdict {
+            case .allow:
+                print("Typing: allowed")
+            case .block(let token):
+                print("Typing: blocked (type.blocked=\(token))")
+            }
+            return
         }
 
         let kakao = try KakaoTalkApp()

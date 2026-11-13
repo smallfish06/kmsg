@@ -56,6 +56,14 @@ final class PhaseProfiler {
         notes.append((key, value))
     }
 
+    /// Like note(), but placed ahead of every other note. For the rare fact
+    /// that must survive a relay which truncates long summary lines: the
+    /// talkfriend bridge keeps the first 500 characters, and a read's res.*
+    /// notes alone can fill that.
+    func noteFirst(_ key: String, _ value: String) {
+        notes.insert((key, value), at: 0)
+    }
+
     /// Print the one-line summary. Safe to call from defer on every exit path;
     /// only the first call prints.
     func emitSummary(status: String) {

@@ -853,7 +853,14 @@ struct KakaoContactAutomation {
             // Let the field's input context settle so the first keystroke
             // right after the focus click isn't swallowed.
             Thread.sleep(forTimeInterval: 0.15)
-            runner.typeTextDirect(text, label: label)
+            // Role only, not identity: this popover's AXFocused can name one
+            // field while keys route to the other (see FieldFocusStrategy).
+            // What must never happen is typing with focus outside any text
+            // input; the verbatim readback below still decides success.
+            guard runner.typeTextGuarded(text, into: .focusedTextInput, label: label) else {
+                runner.log("\(label): typing refused on attempt \(attempt)")
+                continue
+            }
             if runner.waitUntil(label: "\(label) verbatim", timeout: 0.4, condition: { matches(input.stringValue) }) {
                 runner.log("\(label): verbatim reflected on attempt \(attempt)")
                 return

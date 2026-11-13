@@ -1,11 +1,59 @@
+import AppKit
 import ApplicationServices.HIServices
 import Foundation
+
+/// Switches for exercising typing paths a healthy KakaoTalk never reaches
+/// (AXValue normally fills the composer; focus normally lands where asked).
+/// Compiled out of release builds. `KMSG_DEBUG_TYPING=<name>`:
+///   forced       send: treat the composer as not found (blind typing path)
+///   typed-draft  send: type instead of setting AXValue, then clear the draft
+///                and stop before Enter — nothing is sent
+enum DebugTypingHook {
+    static func isOn(_ name: String) -> Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["KMSG_DEBUG_TYPING"] == name
+        #else
+        return false
+        #endif
+    }
+}
+
+/// Where a run of character keys is meant to land.
+enum TypingTarget {
+    /// This exact element must hold keyboard focus.
+    case element(UIElement)
+    /// No handle on the target: whatever holds focus must be a text input.
+    case focusedTextInput
+}
+
+/// One per runner, shared by its copies (the struct is passed by value into
+/// resolvers and automations), so a refusal anywhere reaches the summary line.
+final class TypingBlockReporter {
+    private var sink: ((String) -> Void)?
+    private var reported: Set<String> = []
+
+    func install(_ sink: @escaping (String) -> Void) {
+        self.sink = sink
+    }
+
+    /// Each distinct token is reported once per run; retries repeat it.
+    func report(_ token: String) {
+        guard reported.insert(token).inserted else { return }
+        if let sink {
+            sink(token)
+        } else {
+            // Commands without a summary line still must not refuse silently.
+            FileHandle.standardError.write(Data("[kmsg] type.blocked=\(token)\n".utf8))
+        }
+    }
+}
 
 struct AXActionRunner {
     typealias TraceWriter = (String) -> Void
 
     private let traceEnabled: Bool
     private let traceWriter: TraceWriter
+    private let typingBlocks = TypingBlockReporter()
 
     init(traceEnabled: Bool) {
         self.traceEnabled = traceEnabled
@@ -127,9 +175,14 @@ struct AXActionRunner {
         perCharacterDelay: TimeInterval = 0.01,
         retryDelay: TimeInterval = 0.08
     ) -> Bool {
+        let target: TypingTarget = element.map { .element($0) } ?? .focusedTextInput
         for attempt in 1...max(attempts, 1) {
             let before = element?.stringValue
-            typeText(text, perCharacterDelay: perCharacterDelay)
+            // A refusal is not a reflection miss: the focus was already polled,
+            // so another attempt would only be refused again.
+            guard typeTextGuarded(text, into: target, label: label, perCharacterDelay: perCharacterDelay) else {
+                return false
+            }
             guard let element else {
                 log("\(label): typed without verification target")
                 return true
@@ -256,9 +309,112 @@ struct AXActionRunner {
         pressKey(code: 51) // Backspace
     }
 
+    /// Unguarded typing for the login screen only (Auth/). The blind login
+    /// path runs when no login form could be found in the AX tree, so there is
+    /// no focused element to hold it to. Everything else types through
+    /// `typeTextGuarded`.
     func typeTextDirect(_ text: String, label: String, perCharacterDelay: TimeInterval = 0.01) {
         typeText(text, perCharacterDelay: perCharacterDelay)
         log("\(label): typed without reflection check")
+    }
+
+    /// Route typing refusals onto a command's summary line as `type.blocked=<role>`.
+    func reportTypingBlocks(to note: @escaping (String, String) -> Void) {
+        typingBlocks.install { note("type.blocked", $0) }
+    }
+
+    /// Type only if KakaoTalk's focused element is a text input (and, given a
+    /// target element, that element). Returns false without posting a single
+    /// key event otherwise. See `TypingFocusGuard` for why.
+    @discardableResult
+    func typeTextGuarded(
+        _ text: String,
+        into target: TypingTarget,
+        label: String,
+        perCharacterDelay: TimeInterval = 0.01
+    ) -> Bool {
+        guard typingAllowed(into: target, label: label) else { return false }
+        typeText(text, perCharacterDelay: perCharacterDelay)
+        return true
+    }
+
+    /// Read-only view of what the guard sees right now (`kmsg inspect --focus`).
+    func currentTypingFocus() -> (observation: TypingFocusGuard.Observation, verdict: TypingFocusGuard.Verdict) {
+        let observation = observeTypingFocus(.focusedTextInput)
+        return (observation, TypingFocusGuard.verdict(for: observation))
+    }
+
+    private func typingAllowed(into target: TypingTarget, label: String) -> Bool {
+        // Key focus can trail an AXFocused write by a beat; look up to three
+        // times before refusing. An allowed read costs one look.
+        var verdict = TypingFocusGuard.verdict(for: observeTypingFocus(target))
+        var looks = 1
+        while verdict != .allow, looks < 3 {
+            Thread.sleep(forTimeInterval: 0.08)
+            verdict = TypingFocusGuard.verdict(for: observeTypingFocus(target))
+            looks += 1
+        }
+        guard case .block(let token) = verdict else { return true }
+        log("\(label): typing blocked, focus=\(token); no key events posted")
+        typingBlocks.report(token)
+        return false
+    }
+
+    private func observeTypingFocus(_ target: TypingTarget) -> TypingFocusGuard.Observation {
+        guard let pid = KakaoTalkApp.runningApplication?.processIdentifier else {
+            return TypingFocusGuard.Observation(focusReadable: false)
+        }
+
+        // HID key events go to the system's frontmost app. KakaoTalk keeps
+        // answering with its own focused element while another app is in
+        // front, and activate() is only a request: with another app active it
+        // can be ignored (seen locally — the composer-less send path would
+        // have typed the message and Enter into that other app).
+        //
+        // KakaoTalk's own AXFrontmost is the signal. The system-wide focused
+        // element is consulted only when that cannot be read: it fails
+        // outright when the frontmost app does not answer AX
+        // (kAXErrorCannotComplete with an Electron app in front), so it can
+        // add evidence but never clear it. Unreadable is not evidence.
+        let app = UIElement.application(pid: pid)
+        var focusInOtherApp = false
+        if let frontmost: Bool = app.attributeOptional(kAXFrontmostAttribute) {
+            focusInOtherApp = !frontmost
+        } else if let systemFocused = UIElement.systemWide().focusedUIElement {
+            var owner: pid_t = 0
+            if AXUIElementGetPid(systemFocused.axElement, &owner) == .success, owner > 0, owner != pid {
+                focusInOtherApp = true
+            }
+        }
+
+        guard let focused = app.focusedUIElement else {
+            return TypingFocusGuard.Observation(focusReadable: false, focusInOtherApp: focusInOtherApp)
+        }
+
+        var isExpectedElement: Bool?
+        if case .element(let expected) = target {
+            isExpectedElement = Self.isSameOrInside(focused, expected)
+        }
+        return TypingFocusGuard.Observation(
+            focusReadable: true,
+            role: focused.role,
+            subrole: focused.subrole,
+            isExpectedElement: isExpectedElement,
+            focusInOtherApp: focusInOtherApp
+        )
+    }
+
+    /// The focused element is the target, or sits just inside it (a combo box
+    /// or search field can report its inner text field as focused).
+    private static func isSameOrInside(_ focused: UIElement, _ expected: UIElement) -> Bool {
+        var cursor: UIElement? = focused
+        var hops = 0
+        while let element = cursor, hops <= 3 {
+            if CFEqual(element.axElement, expected.axElement) { return true }
+            cursor = element.parent
+            hops += 1
+        }
+        return false
     }
 
     private func typeText(_ text: String, perCharacterDelay: TimeInterval) {
